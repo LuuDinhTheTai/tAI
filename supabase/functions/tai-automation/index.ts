@@ -310,6 +310,49 @@ async function agentTick(uidFilter=null){
   }
   return {ok:true,checked:relevant.length,results};
 }
+// Upload-Post profile totals are NOT per-post views. Keep them in a separate owner-only table.
+// Null means unavailable; a genuine zero is retained. Reporting ranges follow Upload-Post response dates.
+const validMetric=(x)=>typeof x==="number"&&Number.isSafeInteger(x)&&x>=0?x:
+  (typeof x==="string"&&/^\d+$/.test(x)&&Number.isSafeInteger(Number(x))?Number(x):null);
+const validDay=(x)=>typeof x==="string"&&/^\d{4}-\d{2}-\d{2}$/.test(x)?x:null;
+function unwrapUploadPost(v){
+  for(let i=0;i<3;i++){
+    if(v?.result&&typeof v.result==="object")v=v.result;
+    else if(v?.data&&typeof v.data==="object")v=v.data;
+    else break;
+  }
+  return v;
+}
+async function syncUploadPostProfile(uid){
+  const profile=String(Deno.env.get("UPLOAD_POST_PROFILE")||"default");
+  if(!/^[a-zA-Z0-9_-]{1,80}$/.test(profile))throw Error("Invalid Upload-Post profile");
+  const account=unwrapUploadPost(await mcpCall("get_analytics",{profileUsername:profile,platforms:["threads"]}));
+  const p=account?.threads||account?.platforms?.threads;
+  if(!p||typeof p!=="object")throw Error("Upload-Post did not return Threads account metrics");
+  let weekly=null;
+  try{
+    const w=unwrapUploadPost(await mcpCall("get_total_impressions",{
+      profileUsername:profile,period:"last_week",platforms:["threads"]
+    }));
+    if(w?.success!==false){
+      weekly={value:validMetric(w?.per_platform?.threads??w?.total_impressions),
+        start:validDay(w?.start_date),end:validDay(w?.end_date)};
+    }
+  }catch(e){console.error("upload_post_impressions",safeRunNote(e.message))}
+  const row={user_id:uid,platform:"threads",profile_username:profile,
+    snapshot_date:new Date().toISOString().slice(0,10),
+    followers:validMetric(p.followers),account_impressions:validMetric(p.impressions),
+    weekly_impressions:weekly?.value??null,week_start:weekly?.start??null,week_end:weekly?.end??null,
+    likes:validMetric(p.likes),comments:validMetric(p.comments),
+    shares:validMetric(p.shares),quotes:validMetric(p.quotes),
+    clicks:validMetric(p.clicks),profile_views:validMetric(p.profileViews),reach:validMetric(p.reach),
+    fetched_at:new Date().toISOString()};
+  await db("social_profile_snapshots?on_conflict=user_id,platform,profile_username,snapshot_date",
+    {method:"POST",prefer:"resolution=merge-duplicates",body:row});
+  await audit(uid,"info","Đã đồng bộ thống kê tài khoản Threads qua Upload-Post.");
+  return {profile,followers:row.followers,account_impressions:row.account_impressions,
+    weekly_impressions:row.weekly_impressions,week_start:row.week_start,week_end:row.week_end};
+}
 async function agentReconcileAndAnalyze(uidFilter=null){
   const settings=await db("app_settings?select=user_id,config&limit=200");
   const results=[];
@@ -346,9 +389,16 @@ async function agentReconcileAndAnalyze(uidFilter=null){
     }
     const count=(published||[]).length;
     const mean=rates.length?Math.round(10000*rates.reduce((a,b)=>a+b,0)/rates.length)/100:null;
+    let profileMetrics=null;let profileError=null;
+    try{profileMetrics=await syncUploadPostProfile(uid)}
+    catch(e){profileError=safeRunNote(e.message);await audit(uid,"warning","Không đồng bộ được tài khoản Upload-Post: "+profileError)}
+    const existing=(await db("agent_memory?select=metrics&user_id=eq."+uid+"&limit=1"))?.[0]?.metrics||{};
     await db("agent_memory?on_conflict=user_id",{method:"POST",prefer:"resolution=merge-duplicates",
-      body:{user_id:uid,metrics:{observed_published_posts:count,engagement_rate_percent:mean,samples_with_metrics:rates.length,last_analyzed_at:new Date().toISOString()}}});
-    results.push({user_id:uid,reconciled:pending?.length||0,published:count,metrics_samples:rates.length});
+      body:{user_id:uid,metrics:{...existing,observed_published_posts:count,engagement_rate_percent:mean,
+        samples_with_metrics:rates.length,last_analyzed_at:new Date().toISOString(),
+        ...(profileMetrics?{threads_profile:profileMetrics}:{})}}});
+    results.push({user_id:uid,reconciled:pending?.length||0,published:count,
+      metrics_samples:rates.length,profileMetrics,profileError});
   }
   return {ok:true,results};
 }
@@ -380,6 +430,7 @@ Deno.serve(async(req)=>{
     if(action==="status")return result({ok:true,admin:true,mode:"review-first",providers:{gemini:!!Deno.env.get("GEMINI_API_KEY"),groq:!!Deno.env.get("GROQ_API_KEY"),uploadPost:!!Deno.env.get("UPLOAD_POST_API_KEY")},uploadProfile:Deno.env.get("UPLOAD_POST_PROFILE")||"default"},200,origin);
     if(action==="agent-tick")return result(await agentTick(uid),200,origin);
     if(action==="agent-analyze")return result(await agentReconcileAndAnalyze(uid),200,origin);
+    if(action==="profile-sync")return result({ok:true,profile:await syncUploadPostProfile(uid)},200,origin);
     if(action==="generate")return result(await actionGenerate(uid,body),200,origin);
     if(action==="publish")return result(await actionPublish(uid,body),202,origin);
     if(action==="reconcile")return result(await actionReconcile(uid,body),200,origin);
