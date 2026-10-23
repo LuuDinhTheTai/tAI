@@ -345,7 +345,7 @@ async function agentReconcileAndAnalyze(uidFilter=null){
       }catch(e){console.error("agent-analytics",safeRunNote(e.message))}
     }
     const count=(published||[]).length;
-    const mean=rates.length?Math.round(10000*rates.reduce((a,b)=>a+b,0)/rates.length)/100:0;
+    const mean=rates.length?Math.round(10000*rates.reduce((a,b)=>a+b,0)/rates.length)/100:null;
     await db("agent_memory?on_conflict=user_id",{method:"POST",prefer:"resolution=merge-duplicates",
       body:{user_id:uid,metrics:{observed_published_posts:count,engagement_rate_percent:mean,samples_with_metrics:rates.length,last_analyzed_at:new Date().toISOString()}}});
     results.push({user_id:uid,reconciled:pending?.length||0,published:count,metrics_samples:rates.length});
