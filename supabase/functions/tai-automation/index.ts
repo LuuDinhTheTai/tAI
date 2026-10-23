@@ -566,7 +566,7 @@ Deno.serve(async(req)=>{
     if(action==="status")return result({ok:true,admin:true,mode:"review-first",providers:{gemini:!!Deno.env.get("GEMINI_API_KEY"),groq:!!Deno.env.get("GROQ_API_KEY"),uploadPost:!!Deno.env.get("UPLOAD_POST_API_KEY")},uploadProfile:Deno.env.get("UPLOAD_POST_PROFILE")||"default"},200,origin);
     if(action==="agent-tick")return result(await agentTick(uid),200,origin);
     if(action==="agent-analyze")return result(await agentReconcileAndAnalyze(uid),200,origin);
-    if(action==="profile-sync")return result({ok:true,profile:await syncUploadPostProfile(uid)},200,origin);
+    if(action==="profile-sync")return result({ok:true,profile:await withManualJob(uid,"analytics_sync",body,async b=>{await traceJob(uid,b._jobId,"profile_metrics",45,"Đang lấy số liệu Upload-Post.");const data=await syncUploadPostProfile(uid);await traceJob(uid,b._jobId,"profile_saved",85,"Đã lưu số liệu Threads vào database.");return data})},200,origin);
     if(action==="job-health")return result(await healthCheckJobs(uid),200,origin);
     if(action==="generate")return result(await withManualJob(uid,"manual_ai",body,b=>actionGenerate(uid,b)),200,origin);
     if(action==="publish")return result(await withManualJob(uid,"manual_publish",body,b=>actionPublish(uid,b)),202,origin);
