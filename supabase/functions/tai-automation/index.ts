@@ -57,13 +57,15 @@ async function startTrackedJob(uid,kind,trigger_source){
    body:{user_id:uid,kind,trigger_source,stage:"started",progress:0,status:"running",message:"Đã nhận tác vụ."}});
  const job=rows?.[0];
  if(!job?.id)throw Error("Không ghi được job vào database");
- await db("job_logs",{method:"POST",body:{user_id:uid,job_run_id:job.id,stage:"started",
-    event_status:"started",level:"info",event:"Bắt đầu: "+kind,details:{progress:0,trigger:trigger_source}}});
+ try{await db("job_logs",{method:"POST",body:{user_id:uid,job_run_id:job.id,stage:"started",
+    event_status:"started",level:"info",event:"Bắt đầu: "+kind,details:{progress:0,trigger:trigger_source}}})}
+ catch(e){console.error("job_start_event",cleanStatusMessage(e.message))}
  return job.id;
 }
 async function traceJob(uid,jobId,stage,progress,message,status="running",extras={}){
- if(!jobId)return;
- await logJobStep(uid,jobId,stage,progress,message,status,extras);
+ if(!jobId)return false;
+ try{await logJobStep(uid,jobId,stage,progress,message,status,extras);return true}
+ catch(e){console.error("job_progress_write",stage,cleanStatusMessage(e.message));return false}
 }
 async function withManualJob(uid,kind,body,action){
  const jobId=await startTrackedJob(uid,kind,"manual");
@@ -441,49 +443,97 @@ async function syncUploadPostProfile(uid){
 async function agentReconcileAndAnalyze(uidFilter=null){
   const settings=await db("app_settings?select=user_id,config&limit=200");
   const results=[];
-  for(const setting of (settings||[]).filter(x=>x.config?.agent_enabled===true&&(!uidFilter||x.user_id===uidFilter)).slice(0,10)){
+  for(const setting of (settings||[]).filter(x=>!uidFilter||x.user_id===uidFilter).slice(0,10)){
     const uid=setting.user_id;
     if(!(await db("tai_admins?select=user_id&user_id=eq."+uid+"&limit=1"))?.length)continue;
-    const pending=await db("posts?select=id,upload_post_request_id&user_id=eq."+uid+"&status=eq.processing&upload_post_request_id=not.is.null&limit=8");
-    for(const post of pending||[]){
-      try{await actionReconcile(uid,{postId:post.id})}catch(e){await audit(uid,"warning","Tự đối soát Upload-Post lỗi: "+safeRunNote(e.message),post.id)}
+    const jobId=await startTrackedJob(uid,"analytics_sync",uidFilter?"manual":"cron");
+    if(setting.config?.agent_enabled!==true){
+      await traceJob(uid,jobId,"disabled",100,"Agent đang tắt; bỏ qua tác vụ phân tích tự động.","skipped");
+      results.push({jobId,status:"skipped",reason:"agent_disabled"});
+      continue;
     }
-    const published=await db("posts?select=id,product_id,views,likes,replies,reposts,upload_post_request_id&user_id=eq."+uid+"&status=eq.published&order=published_at.desc&limit=12");
-    const rates=[];
-    for(const post of published||[]){
-      if(!post.upload_post_request_id)continue;
-      try{
-        const remote=await mcpCall("get_post_analytics",{requestId:post.upload_post_request_id});
-        const details=remote?.platforms?.threads||remote?.post_metrics?.threads||remote?.post_metrics||{};
-        if(details?.post_metrics_error)continue;
-        const m=details?.metrics||details;
-        const views=Number(m.views??m.impressions??m.view_count);
-        const likes=Number(m.likes??m.like_count);
-        const replies=Number(m.replies??m.comments);
-        const reposts=Number(m.reposts??m.shares);
-        const body={};
-        if(Number.isFinite(views)&&views>=0)body.views=Math.round(views);
-        if(Number.isFinite(likes)&&likes>=0)body.likes=Math.round(likes);
-        if(Number.isFinite(replies)&&replies>=0)body.replies=Math.round(replies);
-        if(Number.isFinite(reposts)&&reposts>=0)body.reposts=Math.round(reposts);
-        if(Object.keys(body).length){
-          await db("posts?id=eq."+post.id+"&user_id=eq."+uid,{method:"PATCH",body});
-          if(body.views>0)rates.push((body.likes||0)+(body.replies||0)+(body.reposts||0))/body.views;
+    try{
+      await traceJob(uid,jobId,"scan_pending",15,"Đang tìm bài Threads chờ xác nhận xuất bản.");
+      const pending=await db("posts?select=id,upload_post_request_id&user_id=eq."+uid+"&status=eq.processing&upload_post_request_id=not.is.null&limit=8");
+      for(const post of pending||[]){
+        try{
+          await actionReconcile(uid,{postId:post.id,_jobId:jobId});
+        }catch(e){
+          await traceJob(uid,jobId,"reconcile_warning",30,
+            "Đối soát không thành công: "+cleanStatusMessage(e.message),"running",{post_id:post.id});
         }
-      }catch(e){console.error("agent-analytics",safeRunNote(e.message))}
+      }
+      await traceJob(uid,jobId,"post_metrics",45,
+        "Đang đọc thống kê cho các bài đã đăng; một số bài có thể chưa được Threads cấp số liệu.");
+      const published=await db("posts?select=id,product_id,views,likes,replies,reposts,upload_post_request_id&user_id=eq."+uid+"&status=eq.published&order=published_at.desc&limit=12");
+      const rates=[];
+      let unavailable=0,updated=0;
+      for(const post of published||[]){
+        if(!post.upload_post_request_id)continue;
+        try{
+          const remote=await mcpCall("get_post_analytics",{requestId:post.upload_post_request_id});
+          const details=unwrapUploadPost(remote)?.platforms?.threads||
+            remote?.platforms?.threads||remote?.post_metrics?.threads||remote?.post_metrics||{};
+          if(details?.post_metrics_error){
+            unavailable++;
+            await traceJob(uid,jobId,"post_metrics_unavailable",50,
+              "Threads chưa cấp thống kê riêng cho bài: "+cleanStatusMessage(details.post_metrics_error),"running",{post_id:post.id});
+            continue;
+          }
+          const m=details.metrics||details;
+          const row={};
+          for(const [dbKey,keys] of Object.entries({
+             views:["views","impressions","view_count"],likes:["likes","like_count"],
+             replies:["replies","comments"],reposts:["reposts","shares"]
+          })){
+            const raw=keys.map(k=>m?.[k]).find(v=>v!==undefined&&v!==null);
+            const value=validMetric(raw);
+            if(value!==null)row[dbKey]=value;
+          }
+          if(Object.keys(row).length){
+            await db("posts?id=eq."+post.id+"&user_id=eq."+uid,{method:"PATCH",body:row});
+            updated++;
+            if(row.views>0)rates.push((row.likes||0)+(row.replies||0)+(row.reposts||0))/row.views;
+          }else unavailable++;
+        }catch(e){
+          unavailable++;
+          await traceJob(uid,jobId,"post_metrics_warning",50,
+            "Không lấy được thống kê bài: "+cleanStatusMessage(e.message),"running",{post_id:post.id});
+        }
+      }
+      await traceJob(uid,jobId,"profile_metrics",65,
+        "Đang truy vấn số liệu cấp tài khoản từ Upload-Post.");
+      let profileMetrics=null,profileError=null;
+      try{
+        profileMetrics=await syncUploadPostProfile(uid);
+        await traceJob(uid,jobId,"profile_saved",80,
+          "Đã lưu số liệu tài khoản Threads vào Supabase.");
+      }catch(e){
+        profileError=cleanStatusMessage(e.message);
+        await traceJob(uid,jobId,"profile_warning",80,
+          "Không cập nhật được số liệu tài khoản: "+profileError);
+      }
+      const count=(published||[]).length;
+      const mean=rates.length?Math.round(10000*rates.reduce((a,b)=>a+b,0)/rates.length)/100:null;
+      await traceJob(uid,jobId,"memory_update",90,"Đang lưu dữ liệu phân tích vào Agent Memory.");
+      const existing=(await db("agent_memory?select=metrics&user_id=eq."+uid+"&limit=1"))?.[0]?.metrics||{};
+      await db("agent_memory?on_conflict=user_id",{method:"POST",prefer:"resolution=merge-duplicates",
+        body:{user_id:uid,metrics:{...existing,observed_published_posts:count,
+          engagement_rate_percent:mean,samples_with_metrics:rates.length,
+          last_analyzed_at:new Date().toISOString(),
+          ...(profileMetrics?{threads_profile:profileMetrics}:{})}}});
+      const notice=profileError?
+        "Đã cập nhật Agent Memory, nhưng thông tin profile Upload-Post gặp lỗi.":
+        unavailable?"Đã đồng bộ tài khoản; "+unavailable+" bài chưa có metrics đáng tin cậy.":
+        "Đã đồng bộ và lưu số liệu thống kê.";
+      await traceJob(uid,jobId,"completed",100,notice,"completed");
+      results.push({jobId,status:"completed",reconciled:pending?.length||0,
+        published:count,metrics_samples:rates.length,post_metrics_updated:updated,
+        per_post_unavailable:unavailable,profileMetrics,profileError});
+    }catch(e){
+      await traceJob(uid,jobId,"failed",100,"Job phân tích thất bại: "+cleanStatusMessage(e.message),"failed");
+      results.push({jobId,status:"failed",error:cleanStatusMessage(e.message)});
     }
-    const count=(published||[]).length;
-    const mean=rates.length?Math.round(10000*rates.reduce((a,b)=>a+b,0)/rates.length)/100:null;
-    let profileMetrics=null;let profileError=null;
-    try{profileMetrics=await syncUploadPostProfile(uid)}
-    catch(e){profileError=safeRunNote(e.message);await audit(uid,"warning","Không đồng bộ được tài khoản Upload-Post: "+profileError)}
-    const existing=(await db("agent_memory?select=metrics&user_id=eq."+uid+"&limit=1"))?.[0]?.metrics||{};
-    await db("agent_memory?on_conflict=user_id",{method:"POST",prefer:"resolution=merge-duplicates",
-      body:{user_id:uid,metrics:{...existing,observed_published_posts:count,engagement_rate_percent:mean,
-        samples_with_metrics:rates.length,last_analyzed_at:new Date().toISOString(),
-        ...(profileMetrics?{threads_profile:profileMetrics}:{})}}});
-    results.push({user_id:uid,reconciled:pending?.length||0,published:count,
-      metrics_samples:rates.length,profileMetrics,profileError});
   }
   return {ok:true,results};
 }
