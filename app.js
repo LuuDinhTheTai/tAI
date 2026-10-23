@@ -28,7 +28,7 @@ const demoProducts=[
 const demoLogs=[{id:'l1',event:'Bài viết đã được đăng thành công',level:'info',created_at:'2026-10-23T09:20:00+07:00'},{id:'l2',event:'AI Gemini tạo nội dung mới',level:'info',created_at:'2026-10-23T09:10:00+07:00'},{id:'l3',event:'Đã thêm bài viết vào hàng đợi',level:'info',created_at:'2026-10-23T08:00:00+07:00'},{id:'l4',event:'Kiểm tra kết nối Upload-Post',level:'warning',created_at:'2026-10-22T16:10:00+07:00'}];
 const DEFAULTS={model:'gemini',fallback:'groq',daily_limit:3,auto_publish:false,require_review:true,prompt:'Viết bài Threads affiliate tự nhiên, trung thực, ngắn gọn. Có hook, lợi ích thực tế và lời kêu gọi hành động. Ghi rõ đây là nội dung có liên kết tiếp thị. Không bịa trải nghiệm sử dụng hay giá sản phẩm.'};
 const state={page:'overview',period:30,tab:'all',search:'',productsSearch:'',posts:demoPosts,products:demoProducts,logs:demoLogs,settings:{...DEFAULTS},demo:true,config:readConfig(),session:null,loading:false,updated:new Date(),modal:null};
-function readConfig(){try{return JSON.parse(localStorage.getItem('tai.supabase.config')||'{}')}catch{return {}}}
+function readConfig(){const defaults={url:'https://idovyelypzisdngfcecc.supabase.co',key:'sb_publishable_kaFpG58YI0SNa-8gfWcqFw_s2HmLEip'};try{return {...defaults,...JSON.parse(localStorage.getItem('tai.supabase.config')||'{}')}}catch{return defaults}}
 function readSession(){try{return JSON.parse(sessionStorage.getItem('tai.session')||'null')}catch{return null}}
 state.session=readSession();
 const $=s=>document.querySelector(s); const $$=s=>[...document.querySelectorAll(s)];
