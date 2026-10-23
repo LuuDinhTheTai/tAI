@@ -196,14 +196,30 @@ Deno.serve(async(req)=>{
   if(!originAllowed(origin))return result({error:"Origin not allowed"},403,origin);
   if(req.method==="OPTIONS")return new Response(null,{status:204,headers:cors(origin)});
   if(req.method!=="POST")return result({error:"Use POST"},405,origin);
+  let activeUser=null;
+  let activeAction="";
   try{
     const uid=await requireOwner(req);
+    activeUser=uid;
     const size=Number(req.headers.get("content-length")||0);if(size>12000)throw Object.assign(Error("Payload too large"),{status:413});
     const body=await req.json();const action=String(body?.action||"");
+    activeAction=action;
     if(action==="status")return result({ok:true,admin:true,mode:"review-first",providers:{gemini:!!Deno.env.get("GEMINI_API_KEY"),groq:!!Deno.env.get("GROQ_API_KEY"),uploadPost:!!Deno.env.get("UPLOAD_POST_API_KEY")},uploadProfile:Deno.env.get("UPLOAD_POST_PROFILE")||"default"},200,origin);
     if(action==="generate")return result(await actionGenerate(uid,body),200,origin);
     if(action==="publish")return result(await actionPublish(uid,body),202,origin);
     if(action==="reconcile")return result(await actionReconcile(uid,body),200,origin);
     return result({error:"Unknown action"},400,origin);
-  }catch(e){console.error("tai-api",String(e).slice(0,160));return result({error:String(e?.message||"Request failed").slice(0,220)},e?.status||500,origin)}
+  }catch(e){
+    const safeError=String(e?.message||"Request failed")
+      .replace(/Bearer\s+\S+/gi,"Bearer [redacted]")
+      .replace(/(?:sb_secret_|AIza)[A-Za-z0-9_-]+/g,"[redacted]")
+      .slice(0,220);
+    console.error("tai-api",activeAction||"request",safeError);
+    // Only authenticated admins can create activity records. Never log tokens, prompts or credentials.
+    if(activeUser&&["generate","publish","reconcile"].includes(activeAction)){
+      await audit(activeUser,"error",
+        (activeAction==="generate"?"Tạo bài AI":activeAction==="publish"?"Đăng Threads":"Đối soát Threads")+" thất bại: "+safeError);
+    }
+    return result({error:safeError},e?.status||500,origin)
+  }
 });
