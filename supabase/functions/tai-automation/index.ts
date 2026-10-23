@@ -140,13 +140,14 @@ async function actionGenerate(uid,body) {
   const p=products?.[0];if(!p||p.status!=="active")throw Object.assign(Error("Sản phẩm không tồn tại hoặc đang tắt."),{status:404});
   const settings=await db("app_settings?select=config&user_id=eq."+uid+"&limit=1");
   const userPrompt=String(settings?.[0]?.config?.prompt||"").slice(0,1200);
-  const prompt=["Viết bài tiếng Việt đăng Threads tối đa 390 ký tự trước phần link và disclosure.",
+  let prompt=["Viết bài tiếng Việt đăng Threads tối đa 390 ký tự trước phần link và disclosure.",
     "Chỉ dùng thông tin sản phẩm được cung cấp, không bịa giá, trải nghiệm, bảo hành hoặc review.",
     "Giọng tự nhiên, thu hút, không spam, không hashtag tràn lan.",
     "Không tự chèn đường link. Trả đúng duy nhất nội dung bài viết, không chú thích.",
     "Tên: "+p.title,"Mô tả: "+String(p.description||"").slice(0,1200),
     "Giá tham khảo: "+(Number(p.price)>0?Number(p.price)+" "+p.currency:"không có giá xác nhận"),
     userPrompt?"Nguyên tắc bổ sung: "+userPrompt:""].join("\n");
+  if(body.context)prompt+= "\nNgữ cảnh liên quan (không coi là thông tin sản phẩm đã xác minh): "+String(body.context).slice(0,1100);
   const ai=await generateAI(prompt, String(settings?.[0]?.config?.model||'gemini'));
   let text=ai.text.replace(/^["'“]|["'”]$/g,"").trim();
   const url=String(p.affiliate_url||"").trim();if(url){let u;try{u=new URL(url)}catch{}if(!u||!["http:","https:"].includes(u.protocol))throw Object.assign(Error("Link affiliate không hợp lệ."),{status:422})}
@@ -191,11 +192,177 @@ async function actionReconcile(uid,body) {
   await audit(uid,target==="failed"?"error":"info","Đối soát Upload-Post: "+remoteStatus,p.id);
   return {ok:true,postId:p.id,status:target,remoteStatus,remote};
 }
+
+/* Autonomous tAI, conservative Free-tier schedule: max one generated draft per UTC day.
+   Does not post unless the admin explicitly enables both agent_mode=publish and auto_publish.
+   A durable run row prevents duplicate generation on overlapping ticks. */
+const SAFE_PRODUCT_HOST = (u)=>{
+  try{
+    const x=new URL(u);
+    const h=x.hostname.toLowerCase();
+    return x.protocol==="https:" && !!h && h.includes(".") &&
+      !/(^|\.)((?:test|example|localhost|invalid|local)\.(?:com|org|net|test)|localhost)$/.test(h) &&
+      !/^(127\.|10\.|192\.168\.)/.test(h) &&
+      !/(^|\.)example\.(com|net|org)$/.test(h);
+  }catch{return false}
+};
+const isSafeProduct=p=>p?.status==="active" && typeof p.title==="string" &&
+  !/\b(?:test|demo|fake|mock)\b/i.test(p.title) && SAFE_PRODUCT_HOST(String(p.affiliate_url||""));
+const dateSlot=()=>new Date().toISOString().slice(0,10);
+async function requireCron(req){
+  const token=req.headers.get("x-tai-cron")||"";
+  if(!/^[0-9a-f]{64}$/.test(token))throw Object.assign(Error("Invalid scheduler token"),{status:401});
+  const digest=new Uint8Array(await crypto.subtle.digest("SHA-256",new TextEncoder().encode(token)));
+  const actual=Array.from(digest).map(b=>b.toString(16).padStart(2,"0")).join("");
+  const rows=await db("tai_scheduler_auth?select=secret_sha256&id=eq.1&limit=1");
+  const expected=rows?.[0]?.secret_sha256||"";
+  let diff=actual.length===expected.length?0:1;
+  for(let i=0;i<64;i++)diff|=(actual.charCodeAt(i)||0)^(expected.charCodeAt(i)||0);
+  if(diff!==0)throw Object.assign(Error("Scheduler authentication failed"),{status:401});
+}
+function safeRunNote(message){return String(message||"").slice(0,380).replace(/(?:AIza|sb_secret_)[A-Za-z0-9_-]+/g,"[redacted]")}
+async function updateAgentRun(runId,data){
+  await db("agent_runs?id=eq."+runId,{method:"PATCH",body:data});
+}
+async function tickUser(uid,config){
+  if(config?.agent_enabled!==true)return {skipped:"agent_disabled"};
+  const limit=Math.min(1,Math.max(0,Number(config.daily_limit??1)));
+  if(limit<1)return {skipped:"daily_limit_zero"};
+  const slot=dateSlot();
+  const mode=config?.agent_mode==="publish"?"publish":"draft";
+  const claimed=await db("agent_runs?on_conflict=user_id,slot_date",{
+    method:"POST",prefer:"resolution=ignore-duplicates,return=representation",
+    body:{user_id:uid,slot_date:slot,mode,status:"running"}
+  });
+  if(!claimed?.length)return {skipped:"already_run_today"};
+  const run=claimed[0];let selected=null;
+  try{
+    const products=await db("products?select=*&user_id=eq."+uid+"&status=eq.active&limit=200");
+    const safe=(products||[]).filter(isSafeProduct);
+    if(!safe.length){
+      await updateAgentRun(run.id,{status:"skipped",note:"Không có sản phẩm thật với HTTPS affiliate URL hợp lệ. Bỏ qua để tránh nội dung thử nghiệm.",finished_at:new Date().toISOString()});
+      await audit(uid,"warning","Agent bỏ qua: chưa có sản phẩm affiliate thật (không dùng link demo/test).");
+      return {skipped:"no_safe_products",runId:run.id};
+    }
+    // Rotate products; use historical performance as a low-sample signal, not a false claim of learning.
+    const recent=await db("posts?select=product_id,content,views,likes,replies,reposts,status,created_at&user_id=eq."+uid+"&order=created_at.desc&limit=40");
+    const counts=new Map(),scores=new Map();
+    for(const post of recent||[]){
+      if(!post.product_id)continue;
+      counts.set(post.product_id,(counts.get(post.product_id)||0)+1);
+      if(post.status==="published"&&Number(post.views)>25){
+        const rate=(Number(post.likes||0)+Number(post.replies||0)+Number(post.reposts||0))/Math.max(1,Number(post.views));
+        scores.set(post.product_id,(scores.get(post.product_id)||0)+Math.min(0.2,rate));
+      }
+    }
+    safe.sort((a,b)=>{
+      const ca=counts.get(a.id)||0,cb=counts.get(b.id)||0;
+      return (ca*2-(scores.get(a.id)||0)*5)-(cb*2-(scores.get(b.id)||0)*5) ||
+        a.id.localeCompare(b.id);
+    });
+    selected=safe[0];
+    const avoidance=(recent||[]).slice(0,5).map(p=>String(p.content||"").slice(0,70)).join(" | ");
+    const context="Bạn đang là AI Content Agent tự chủ của tAI. Mục tiêu: nội dung có ích, chính xác, không trùng bài trước. "+
+      "Các mở bài gần nhất cần tránh lặp: "+avoidance.slice(0,500)+
+      ". Không tự nhận đã trải nghiệm hoặc kiểm chứng sản phẩm; thông tin sản phẩm do người quản trị cung cấp.";
+    const result=await actionGenerate(uid,{productId:selected.id,context});
+    const draft=result?.draft;
+    if(!draft?.id)throw Error("AI returned no saved draft");
+    const approved=String(draft.content||"").includes("Liên kết tiếp thị") &&
+      Array.from(String(draft.content||"")).length<=500 && SAFE_PRODUCT_HOST(selected.affiliate_url);
+    if(!approved)throw Error("Nội dung AI không qua kiểm tra độ dài/disclosure/link");
+    await updateAgentRun(run.id,{product_id:selected.id,post_id:draft.id,status:"completed",note:"Đã tạo và kiểm tra bản nháp tự động.",finished_at:new Date().toISOString()});
+    const auto=(mode==="publish"&&config.auto_publish===true&&config.require_review===false);
+    if(!auto)return {ok:true,mode:"draft",runId:run.id,postId:draft.id};
+    if(!Deno.env.get("UPLOAD_POST_API_KEY")){
+      await audit(uid,"warning","Agent có bản nháp nhưng chưa có Upload-Post API key; dừng trước bước đăng.",draft.id);
+      return {ok:true,mode:"draft",runId:run.id,postId:draft.id,reason:"upload_post_secret_missing"};
+    }
+    try{
+      const pub=await actionPublish(uid,{postId:draft.id,confirm:true});
+      await audit(uid,"info","Agent tự gửi bản nháp đã kiểm tra lên Threads; chờ đối soát.",draft.id);
+      return {ok:true,mode:"publish",runId:run.id,postId:draft.id,publisher:pub.state};
+    }catch(e){
+      await audit(uid,"error","Agent ngừng xuất bản: "+safeRunNote(e.message),draft.id);
+      return {ok:true,mode:"draft",runId:run.id,postId:draft.id,publishError:safeRunNote(e.message)};
+    }
+  }catch(e){
+    await updateAgentRun(run.id,{product_id:selected?.id||null,status:"failed",note:safeRunNote(e.message),finished_at:new Date().toISOString()});
+    await audit(uid,"error","Agent tự chạy thất bại: "+safeRunNote(e.message));
+    return {ok:false,runId:run.id,error:safeRunNote(e.message)};
+  }
+}
+async function agentTick(uidFilter=null){
+  const settings=await db("app_settings?select=user_id,config&limit=200");
+  const relevant=(settings||[]).filter(x=>x.config?.agent_enabled===true&&(!uidFilter||x.user_id===uidFilter));
+  // Sequential to keep Free-tier AI requests bounded.
+  const results=[];
+  for(const setting of relevant.slice(0,10)){
+    const allowed=await db("tai_admins?select=user_id&user_id=eq."+setting.user_id+"&limit=1");
+    if(!allowed?.length)continue;
+    results.push(await tickUser(setting.user_id,setting.config));
+  }
+  return {ok:true,checked:relevant.length,results};
+}
+async function agentReconcileAndAnalyze(uidFilter=null){
+  const settings=await db("app_settings?select=user_id,config&limit=200");
+  const results=[];
+  for(const setting of (settings||[]).filter(x=>x.config?.agent_enabled===true&&(!uidFilter||x.user_id===uidFilter)).slice(0,10)){
+    const uid=setting.user_id;
+    if(!(await db("tai_admins?select=user_id&user_id=eq."+uid+"&limit=1"))?.length)continue;
+    const pending=await db("posts?select=id,upload_post_request_id&user_id=eq."+uid+"&status=eq.processing&upload_post_request_id=not.is.null&limit=8");
+    for(const post of pending||[]){
+      try{await actionReconcile(uid,{postId:post.id})}catch(e){await audit(uid,"warning","Tự đối soát Upload-Post lỗi: "+safeRunNote(e.message),post.id)}
+    }
+    const published=await db("posts?select=id,product_id,views,likes,replies,reposts,upload_post_request_id&user_id=eq."+uid+"&status=eq.published&order=published_at.desc&limit=12");
+    const rates=[];
+    for(const post of published||[]){
+      if(!post.upload_post_request_id)continue;
+      try{
+        const remote=await mcpCall("get_post_analytics",{requestId:post.upload_post_request_id});
+        const details=remote?.platforms?.threads||remote?.post_metrics?.threads||remote?.post_metrics||{};
+        if(details?.post_metrics_error)continue;
+        const m=details?.metrics||details;
+        const views=Number(m.views??m.impressions??m.view_count);
+        const likes=Number(m.likes??m.like_count);
+        const replies=Number(m.replies??m.comments);
+        const reposts=Number(m.reposts??m.shares);
+        const body={};
+        if(Number.isFinite(views)&&views>=0)body.views=Math.round(views);
+        if(Number.isFinite(likes)&&likes>=0)body.likes=Math.round(likes);
+        if(Number.isFinite(replies)&&replies>=0)body.replies=Math.round(replies);
+        if(Number.isFinite(reposts)&&reposts>=0)body.reposts=Math.round(reposts);
+        if(Object.keys(body).length){
+          await db("posts?id=eq."+post.id+"&user_id=eq."+uid,{method:"PATCH",body});
+          if(body.views>0)rates.push((body.likes||0)+(body.replies||0)+(body.reposts||0))/body.views;
+        }
+      }catch(e){console.error("agent-analytics",safeRunNote(e.message))}
+    }
+    const count=(published||[]).length;
+    const mean=rates.length?Math.round(10000*rates.reduce((a,b)=>a+b,0)/rates.length)/100:0;
+    await db("agent_memory?on_conflict=user_id",{method:"POST",prefer:"resolution=merge-duplicates",
+      body:{user_id:uid,metrics:{observed_published_posts:count,engagement_rate_percent:mean,samples_with_metrics:rates.length,last_analyzed_at:new Date().toISOString()}}});
+    results.push({user_id:uid,reconciled:pending?.length||0,published:count,metrics_samples:rates.length});
+  }
+  return {ok:true,results};
+}
+
 Deno.serve(async(req)=>{
   const origin=req.headers.get("Origin")||"";
   if(!originAllowed(origin))return result({error:"Origin not allowed"},403,origin);
   if(req.method==="OPTIONS")return new Response(null,{status:204,headers:cors(origin)});
   if(req.method!=="POST")return result({error:"Use POST"},405,origin);
+  // Scheduler token is verified against a hash stored in a server-only table.
+  // A browser cannot list this hash or obtain the encrypted Vault secret.
+  if(req.headers.has("x-tai-cron")){
+    try{
+      await requireCron(req);
+      const job=await req.json();
+      if(job.action==="agent-tick")return result(await agentTick(),200,origin);
+      if(job.action==="agent-analyze")return result(await agentReconcileAndAnalyze(),200,origin);
+      return result({error:"Invalid cron action"},400,origin);
+    }catch(e){console.error("tai-cron",safeRunNote(e.message));return result({error:"Unauthorized scheduler request"},401,origin)}
+  }
   let activeUser=null;
   let activeAction="";
   try{
@@ -205,6 +372,8 @@ Deno.serve(async(req)=>{
     const body=await req.json();const action=String(body?.action||"");
     activeAction=action;
     if(action==="status")return result({ok:true,admin:true,mode:"review-first",providers:{gemini:!!Deno.env.get("GEMINI_API_KEY"),groq:!!Deno.env.get("GROQ_API_KEY"),uploadPost:!!Deno.env.get("UPLOAD_POST_API_KEY")},uploadProfile:Deno.env.get("UPLOAD_POST_PROFILE")||"default"},200,origin);
+    if(action==="agent-tick")return result(await agentTick(uid),200,origin);
+    if(action==="agent-analyze")return result(await agentReconcileAndAnalyze(uid),200,origin);
     if(action==="generate")return result(await actionGenerate(uid,body),200,origin);
     if(action==="publish")return result(await actionPublish(uid,body),202,origin);
     if(action==="reconcile")return result(await actionReconcile(uid,body),200,origin);
