@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="vi">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="theme-color" content="#101a1b" />
+  <meta name="description" content="tAI Console — quản lý nội dung affiliate Threads, AI và tự động hóa." />
+  <title>tAI Console — Affiliate Automation</title>
+  <link rel="icon" href="data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCA2NCA2NCI+PHJlY3Qgd2lkdGg9IjY0IiBoZWlnaHQ9IjY0IiByeD0iMTciIGZpbGw9IiMxNDI0MjUiLz48cGF0aCBkPSJNMTcgMThoMTR2N2gtN3YyMGgtN3ptMjAgMGgxMHYyN0gzN3oiIGZpbGw9IiNiY2Y1NzQiLz48Y2lyY2xlIGN4PSI0OSIgY3k9IjE2IiByPSI0IiBmaWxsPSIjYmNmNTc0Ii8+PC9zdmc+Cg==" type="image/svg+xml" />
+  <link rel="stylesheet" href="/styles.css" />
+  <script type="module" src="/app.js"></script>
+</head>
+<body>
+  <div class="shell">
+    <aside class="sidebar" id="sidebar" aria-label="Điều hướng chính">
+      <a class="brand" href="#overview" aria-label="tAI Console - Tổng quan">
+        <span class="brand-emblem">t<span>AI</span><span class="brand-star">✳</span></span>
+        <span class="brand-wordmark"><strong>tAI</strong><small>CONSOLE</small></span>
+      </a>
+      <div class="workspace-switch"><span class="workspace-avatar">T</span><div><b>tAI Workspace</b><small>Personal workspace</small></div><span class="chevron">⌄</span></div>
+      <div class="sidebar-label">WORKSPACE</div>
+      <nav class="nav-list" id="main-nav">
+        <a href="#overview" data-page="overview" class="nav-link selected" aria-current="page"><span data-icon="layout"></span>Tổng quan</a>
+        <a href="#posts" data-page="posts" class="nav-link"><span data-icon="file-text"></span>Bài đăng <span class="nav-counter" id="nav-post-count">0</span></a>
+        <a href="#products" data-page="products" class="nav-link"><span data-icon="package"></span>Sản phẩm</a>
+        <a href="#analytics" data-page="analytics" class="nav-link"><span data-icon="chart"></span>Phân tích</a>
+      </nav>
+      <div class="sidebar-label separate">QUẢN TRỊ</div>
+      <nav class="nav-list">
+        <a href="#automation" data-page="automation" class="nav-link"><span data-icon="sparkles"></span>AI & Tự động hóa</a>
+        <a href="#settings" data-page="settings" class="nav-link"><span data-icon="settings"></span>Cài đặt & Kết nối</a>
+      </nav>
+      <div class="sidebar-bottom">
+        <div class="side-insight"><div class="side-insight-icon" data-icon="zap"></div><strong>Sẵn sàng tăng tốc?</strong><p>Kết nối Supabase để quản lý dữ liệu thật và vận hành tAI.</p><button class="side-insight-btn" data-goto="settings">Thiết lập ngay <span data-icon="arrow-up-right"></span></button></div>
+        <div class="profile"><div class="profile-avatar">TA</div><div class="profile-name"><strong>tAI Admin</strong><small id="profile-caption">Chưa kết nối</small></div><button class="icon-button dark-icon" id="sidebar-signout" title="Đăng xuất" aria-label="Đăng xuất" hidden><span data-icon="log-out"></span></button></div>
+      </div>
+    </aside>
+    <div class="mobile-scrim" id="mobile-scrim" hidden></div>
+    <div class="main-area">
+      <header class="topbar">
+        <div class="topbar-left"><button class="icon-button mobile-menu" id="mobile-menu" aria-label="Mở menu"><span data-icon="menu"></span></button><span class="breadcrumb">Workspace</span><span class="breadcrumb-slash">/</span><span id="breadcrumb-page" class="breadcrumb-current">Tổng quan</span></div>
+        <div class="topbar-right"><div class="topbar-help"><span data-icon="shield-check"></span> Self-hosted frontend</div><button id="top-refresh" class="icon-button top-icon" title="Làm mới dữ liệu" aria-label="Làm mới dữ liệu"><span data-icon="refresh-cw"></span></button><button class="top-avatar" id="top-avatar" title="Cài đặt tài khoản">TA</button></div>
+      </header>
+      <main id="content" tabindex="-1"></main>
+      <footer class="footer"><span>© 2026 tAI Console <span class="footer-sep">·</span> Made for smarter affiliate workflows</span><span id="footer-source">Nguồn dữ liệu: Demo</span></footer>
+    </div>
+  </div>
+  <div id="modal-root"></div>
+  <div class="toast-region" id="toast-region" aria-live="polite"></div>
+</body>
+</html>
