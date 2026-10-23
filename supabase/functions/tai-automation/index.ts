@@ -30,6 +30,67 @@ async function requireOwner(req) {
 async function audit(uid,level,event,postId) {
   try{await db("job_logs",{method:"POST",body:{user_id:uid,level,event:String(event).slice(0,600),...(postId?{post_id:postId}:{})}})}catch(e){console.error("audit_error",String(e).slice(0,150))}
 }
+
+// Persistent structured execution timeline, intentionally limited to non-sensitive metadata.
+const cleanStatusMessage=(x)=>String(x??"").replace(/Bearer\s+\S+/gi,"Bearer [redacted]")
+ .replace(/(?:sb_secret_|AIza)[A-Za-z0-9_-]+/g,"[redacted]").slice(0,700);
+async function logJobStep(uid,jobId,stage,progress,message,status="running",extras={}){
+ const terminal=status!=="running";
+ const time=new Date().toISOString();
+ const safe=cleanStatusMessage(message);
+ const body={stage,progress,status,message:safe,updated_at:time,
+   ...(terminal?{finished_at:time}:{})};
+ if(extras.product_id)body.product_id=extras.product_id;
+ if(extras.post_id)body.post_id=extras.post_id;
+ await db("job_runs?id=eq."+jobId+"&user_id=eq."+uid,{method:"PATCH",body});
+ await db("job_logs",{method:"POST",body:{
+   user_id:uid,job_run_id:jobId,
+   ...(extras.post_id?{post_id:extras.post_id}:{}),
+   stage,event_status:terminal?status:"progress",
+   level:status==="failed"?"error":status==="skipped"?"warning":"info",
+   event:safe.slice(0,600),
+   details:{progress,status,...(extras.model?{model:String(extras.model).slice(0,80)}:{})}
+ }});
+}
+async function startTrackedJob(uid,kind,trigger_source){
+ const rows=await db("job_runs",{method:"POST",prefer:"return=representation",
+   body:{user_id:uid,kind,trigger_source,stage:"started",progress:0,status:"running",message:"Đã nhận tác vụ."}});
+ const job=rows?.[0];
+ if(!job?.id)throw Error("Không ghi được job vào database");
+ await db("job_logs",{method:"POST",body:{user_id:uid,job_run_id:job.id,stage:"started",
+    event_status:"started",level:"info",event:"Bắt đầu: "+kind,details:{progress:0,trigger:trigger_source}}});
+ return job.id;
+}
+async function traceJob(uid,jobId,stage,progress,message,status="running",extras={}){
+ if(!jobId)return;
+ await logJobStep(uid,jobId,stage,progress,message,status,extras);
+}
+async function withManualJob(uid,kind,body,action){
+ const jobId=await startTrackedJob(uid,kind,"manual");
+ try{
+   const output=await action({...body,_jobId:jobId});
+   const endStage=kind==="manual_publish"?"await_reconcile":"completed";
+   await traceJob(uid,jobId,endStage,100,
+     kind==="manual_publish"?"Đã gửi yêu cầu xuất bản; cần đối soát kết quả.":"Đã hoàn thành tác vụ.",
+     "completed",{post_id:output?.postId||output?.draft?.id});
+   return output;
+ }catch(e){
+   await traceJob(uid,jobId,"failed",100,"Tác vụ thất bại: "+cleanStatusMessage(e.message),"failed");
+   throw e;
+ }
+}
+async function healthCheckJobs(uidFilter=null){
+ const admins=await db("tai_admins?select=user_id&limit=20");
+ const rows=[];
+ for(const a of (admins||[]).filter(x=>!uidFilter||x.user_id===uidFilter)){
+   const id=await startTrackedJob(a.user_id,"diagnostic",uidFilter?"manual":"system");
+   await traceJob(a.user_id,id,"check_database",35,"Database và phân quyền ghi log hoạt động.");
+   await traceJob(a.user_id,id,"check_cron",75,"Backend có thể ghi nhận tiến trình tác vụ.");
+   await traceJob(a.user_id,id,"completed",100,"Kiểm tra hoàn tất; không gọi AI và không đăng Threads.","completed");
+   rows.push({jobId:id,status:"completed"});
+ }
+ return {ok:true,results:rows};
+}
 function mcpParse(text) {
   let raw;
   try{raw=JSON.parse(text)}catch{
@@ -148,7 +209,9 @@ async function actionGenerate(uid,body) {
     "Giá tham khảo: "+(Number(p.price)>0?Number(p.price)+" "+p.currency:"không có giá xác nhận"),
     userPrompt?"Nguyên tắc bổ sung: "+userPrompt:""].join("\n");
   if(body.context)prompt+= "\nNgữ cảnh liên quan (không coi là thông tin sản phẩm đã xác minh): "+String(body.context).slice(0,1100);
+  await traceJob(uid,body._jobId,"ai_request",55,"Đang gọi mô hình AI để tạo nội dung.");
   const ai=await generateAI(prompt, String(settings?.[0]?.config?.model||'gemini'));
+  await traceJob(uid,body._jobId,"ai_response",72,"AI đã trả nội dung.", "running",{model:ai.provider});
   let text=ai.text.replace(/^["'“]|["'”]$/g,"").trim();
   const url=String(p.affiliate_url||"").trim();if(url){let u;try{u=new URL(url)}catch{}if(!u||!["http:","https:"].includes(u.protocol))throw Object.assign(Error("Link affiliate không hợp lệ."),{status:422})}
   const suffix="\n\nLiên kết tiếp thị"+(url?": "+url:".");
@@ -156,6 +219,7 @@ async function actionGenerate(uid,body) {
   const finalText=text+suffix;
   if(!text||Array.from(finalText).length>500)throw Error("AI content exceeds Threads length");
   const rows=await db("posts",{method:"POST",prefer:"return=representation",body:{user_id:uid,product_id:p.id,content:finalText,status:"draft",provider:ai.provider}});
+  await traceJob(uid,body._jobId,"draft_saved",82,"Đã lưu bản nháp Threads trong Supabase.","running",{post_id:rows?.[0]?.id});
   await audit(uid,"info","Đã tạo bản nháp AI; đang chờ người quản trị duyệt.",rows?.[0]?.id);
   return {ok:true,draft:rows?.[0],note:"Chưa đăng Threads; cần duyệt trước."};
 }
@@ -169,12 +233,16 @@ async function actionPublish(uid,body) {
   const locked=await db("posts?id=eq."+p.id+"&user_id=eq."+uid+"&status=in.(draft,scheduled)&upload_post_request_id=is.null",{method:"PATCH",prefer:"return=representation",body:{status:"processing",attempts:p.attempts+1,last_error:null}});
   if(locked?.length!==1)throw Object.assign(Error("Bài đang xử lý bởi phiên khác."),{status:409});
   try{
+    await traceJob(uid,body._jobId,"publisher_request",90,"Đang gửi bài tới Upload-Post; không gửi lại khi kết quả không rõ.","running",{post_id:p.id});
     const response=await mcpCall("upload_text",{title:p.content,user:Deno.env.get("UPLOAD_POST_PROFILE")||"default",platforms:["threads"],asyncUpload:true});
     const rid=response?.request_id||response?.requestId||response?.data?.request_id||
       response?.result?.request_id||response?.result?.data?.request_id||null;
     const jid=response?.job_id||response?.jobId||response?.data?.job_id||
       response?.result?.job_id||null;
     await db("posts?id=eq."+p.id+"&user_id=eq."+uid,{method:"PATCH",body:{status:rid?"processing":"paused",upload_post_request_id:rid,upload_post_job_id:jid,last_error:rid?null:"Đã gửi MCP nhưng không nhận request_id; cần kiểm tra thủ công trước khi thử lại."}});
+    await traceJob(uid,body._jobId,"publisher_response",95,
+      rid?"Upload-Post đã nhận yêu cầu; đang chờ đối soát.":"Upload-Post không trả request_id; cần kiểm tra thủ công.",
+      "running",{post_id:p.id});
     await audit(uid,"info","Đã gửi tới Upload-Post MCP; chờ đối soát kết quả.",p.id);
     return {ok:true,postId:p.id,requestId:rid,state:rid?"processing":"reconciliation_required",note:"Không tự động gửi lại bài khi kết quả bất định."};
   }catch(e){
@@ -187,6 +255,7 @@ async function actionReconcile(uid,body) {
   if(!uuid(body.postId))throw Object.assign(Error("Invalid postId"),{status:400});
   const p=(await db("posts?select=*&id=eq."+body.postId+"&user_id=eq."+uid+"&limit=1"))?.[0];
   if(!p?.upload_post_request_id)throw Object.assign(Error("Bài chưa có request_id để đối soát."),{status:409});
+  await traceJob(uid,body._jobId,"reconcile",45,"Đang truy vấn trạng thái Upload-Post.","running",{post_id:p.id});
   const remote=await mcpCall("get_status",{requestId:p.upload_post_request_id});
   const remoteStatus=String(remote?.status||remote?.data?.status||"unknown").toLowerCase();
   const results=remote?.results||remote?.data?.results||[];
@@ -230,27 +299,31 @@ function safeRunNote(message){return String(message||"").slice(0,380).replace(/(
 async function updateAgentRun(runId,data){
   await db("agent_runs?id=eq."+runId,{method:"PATCH",body:data});
 }
-async function tickUser(uid,config){
-  if(config?.agent_enabled!==true)return {skipped:"agent_disabled"};
+async function tickUser(uid,config,source="cron"){
+  const job=await startTrackedJob(uid,"agent_cycle",source);
+  if(config?.agent_enabled!==true){await traceJob(uid,job,"disabled",100,"Agent đang tắt trong cấu hình.","skipped");return {skipped:"agent_disabled",jobId:job}}
   const limit=Math.min(1,Math.max(0,Number(config.daily_limit??1)));
-  if(limit<1)return {skipped:"daily_limit_zero"};
+  if(limit<1){await traceJob(uid,job,"limit",100,"Giới hạn bài/ngày bằng 0.","skipped");return {skipped:"daily_limit_zero",jobId:job}}
   const slot=dateSlot();
   const mode=config?.agent_mode==="publish"?"publish":"draft";
   const claimed=await db("agent_runs?on_conflict=user_id,slot_date",{
     method:"POST",prefer:"resolution=ignore-duplicates,return=representation",
     body:{user_id:uid,slot_date:slot,mode,status:"running"}
   });
-  if(!claimed?.length)return {skipped:"already_run_today"};
+  if(!claimed?.length){await traceJob(uid,job,"duplicate",100,"Lượt tạo bài hôm nay đã tồn tại, không gọi AI lần nữa.","skipped");return {skipped:"already_run_today",jobId:job}}
   const run=claimed[0];let selected=null;
   try{
+    await traceJob(uid,job,"scan_products",12,"Đang kiểm tra danh sách sản phẩm.");
     const products=await db("products?select=*&user_id=eq."+uid+"&status=eq.active&limit=200");
     const safe=(products||[]).filter(isSafeProduct);
     if(!safe.length){
       await updateAgentRun(run.id,{status:"skipped",note:"Không có sản phẩm thật với HTTPS affiliate URL hợp lệ. Bỏ qua để tránh nội dung thử nghiệm.",finished_at:new Date().toISOString()});
+      await traceJob(uid,job,"no_safe_products",100,"Không có sản phẩm affiliate hợp lệ; bỏ qua lượt tạo bài.","skipped");
       await audit(uid,"warning","Agent bỏ qua: chưa có sản phẩm affiliate thật (không dùng link demo/test).");
       return {skipped:"no_safe_products",runId:run.id};
     }
     // Rotate products; use historical performance as a low-sample signal, not a false claim of learning.
+    await traceJob(uid,job,"select_product",28,"Đã tìm thấy "+safe.length+" sản phẩm đạt điều kiện; đang đánh giá lựa chọn.");
     const recent=await db("posts?select=product_id,content,views,likes,replies,reposts,status,created_at&user_id=eq."+uid+"&order=created_at.desc&limit=40");
     const counts=new Map(),scores=new Map();
     for(const post of recent||[]){
@@ -267,46 +340,58 @@ async function tickUser(uid,config){
         a.id.localeCompare(b.id);
     });
     selected=safe[0];
+    await traceJob(uid,job,"read_context",40,"Đã chọn sản phẩm và đang đọc lịch sử nội dung.","running",{product_id:selected.id});
     const avoidance=(recent||[]).slice(0,5).map(p=>String(p.content||"").slice(0,70)).join(" | ");
     const context="Bạn đang là AI Content Agent tự chủ của tAI. Mục tiêu: nội dung có ích, chính xác, không trùng bài trước. "+
       "Các mở bài gần nhất cần tránh lặp: "+avoidance.slice(0,500)+
       ". Không tự nhận đã trải nghiệm hoặc kiểm chứng sản phẩm; thông tin sản phẩm do người quản trị cung cấp.";
-    const result=await actionGenerate(uid,{productId:selected.id,context});
+    const result=await actionGenerate(uid,{productId:selected.id,context,_jobId:job});
     const draft=result?.draft;
     if(!draft?.id)throw Error("AI returned no saved draft");
     const approved=String(draft.content||"").includes("Liên kết tiếp thị") &&
       Array.from(String(draft.content||"")).length<=500 && SAFE_PRODUCT_HOST(selected.affiliate_url);
     if(!approved)throw Error("Nội dung AI không qua kiểm tra độ dài/disclosure/link");
-    await updateAgentRun(run.id,{product_id:selected.id,post_id:draft.id,status:"completed",note:"Đã tạo và kiểm tra bản nháp tự động.",finished_at:new Date().toISOString()});
+    await traceJob(uid,job,"content_verified",86,"Nội dung đạt kiểm tra disclosure, độ dài và liên kết.","running",{product_id:selected.id,post_id:draft.id});
     const auto=(mode==="publish"&&config.auto_publish===true&&config.require_review===false);
-    if(!auto)return {ok:true,mode:"draft",runId:run.id,postId:draft.id};
+    if(!auto){
+      await updateAgentRun(run.id,{product_id:selected.id,post_id:draft.id,status:"completed",note:"Đã tạo bản nháp tự động; chờ người dùng duyệt.",finished_at:new Date().toISOString()});
+      await traceJob(uid,job,"completed",100,"Đã lưu bản nháp. Chưa đăng Threads.","completed",{post_id:draft.id,product_id:selected.id});
+      return {ok:true,mode:"draft",runId:run.id,jobId:job,postId:draft.id};
+    }
     if(!Deno.env.get("UPLOAD_POST_API_KEY")){
+      await updateAgentRun(run.id,{product_id:selected.id,post_id:draft.id,status:"completed",note:"Chưa cấu hình Upload-Post API key.",finished_at:new Date().toISOString()});
+      await traceJob(uid,job,"publisher_unconfigured",100,"Đã tạo bản nháp, nhưng thiếu Upload-Post API key; không đăng.","skipped",{post_id:draft.id});
       await audit(uid,"warning","Agent có bản nháp nhưng chưa có Upload-Post API key; dừng trước bước đăng.",draft.id);
       return {ok:true,mode:"draft",runId:run.id,postId:draft.id,reason:"upload_post_secret_missing"};
     }
     try{
-      const pub=await actionPublish(uid,{postId:draft.id,confirm:true});
+      const pub=await actionPublish(uid,{postId:draft.id,confirm:true,_jobId:job});
+      await updateAgentRun(run.id,{product_id:selected.id,post_id:draft.id,status:"completed",note:"Đã gửi Upload-Post; chờ đối soát kết quả.",finished_at:new Date().toISOString()});
+      await traceJob(uid,job,"await_reconcile",100,"Đã gửi Upload-Post; job kết thúc, bài còn chờ đối soát.","completed",{post_id:draft.id});
       await audit(uid,"info","Agent tự gửi bản nháp đã kiểm tra lên Threads; chờ đối soát.",draft.id);
       return {ok:true,mode:"publish",runId:run.id,postId:draft.id,publisher:pub.state};
     }catch(e){
+      await updateAgentRun(run.id,{product_id:selected.id,post_id:draft.id,status:"failed",note:safeRunNote(e.message),finished_at:new Date().toISOString()});
+      await traceJob(uid,job,"publish_failed",100,"Tạo được bản nháp nhưng xuất bản chưa xác nhận: "+safeRunNote(e.message),"failed",{post_id:draft.id});
       await audit(uid,"error","Agent ngừng xuất bản: "+safeRunNote(e.message),draft.id);
       return {ok:true,mode:"draft",runId:run.id,postId:draft.id,publishError:safeRunNote(e.message)};
     }
   }catch(e){
     await updateAgentRun(run.id,{product_id:selected?.id||null,status:"failed",note:safeRunNote(e.message),finished_at:new Date().toISOString()});
+    await traceJob(uid,job,"failed",100,"Agent thất bại: "+safeRunNote(e.message),"failed");
     await audit(uid,"error","Agent tự chạy thất bại: "+safeRunNote(e.message));
     return {ok:false,runId:run.id,error:safeRunNote(e.message)};
   }
 }
 async function agentTick(uidFilter=null){
   const settings=await db("app_settings?select=user_id,config&limit=200");
-  const relevant=(settings||[]).filter(x=>x.config?.agent_enabled===true&&(!uidFilter||x.user_id===uidFilter));
+  const relevant=(settings||[]).filter(x=>!uidFilter||x.user_id===uidFilter);
   // Sequential to keep Free-tier AI requests bounded.
   const results=[];
   for(const setting of relevant.slice(0,10)){
     const allowed=await db("tai_admins?select=user_id&user_id=eq."+setting.user_id+"&limit=1");
     if(!allowed?.length)continue;
-    results.push(await tickUser(setting.user_id,setting.config));
+    results.push(await tickUser(setting.user_id,setting.config,uidFilter?"manual":"cron"));
   }
   return {ok:true,checked:relevant.length,results};
 }
@@ -416,6 +501,7 @@ Deno.serve(async(req)=>{
       const job=await req.json();
       if(job.action==="agent-tick")return result(await agentTick(),200,origin);
       if(job.action==="agent-analyze")return result(await agentReconcileAndAnalyze(),200,origin);
+      if(job.action==="job-health")return result(await healthCheckJobs(),200,origin);
       return result({error:"Invalid cron action"},400,origin);
     }catch(e){console.error("tai-cron",safeRunNote(e.message));return result({error:"Unauthorized scheduler request"},401,origin)}
   }
@@ -431,9 +517,10 @@ Deno.serve(async(req)=>{
     if(action==="agent-tick")return result(await agentTick(uid),200,origin);
     if(action==="agent-analyze")return result(await agentReconcileAndAnalyze(uid),200,origin);
     if(action==="profile-sync")return result({ok:true,profile:await syncUploadPostProfile(uid)},200,origin);
-    if(action==="generate")return result(await actionGenerate(uid,body),200,origin);
-    if(action==="publish")return result(await actionPublish(uid,body),202,origin);
-    if(action==="reconcile")return result(await actionReconcile(uid,body),200,origin);
+    if(action==="job-health")return result(await healthCheckJobs(uid),200,origin);
+    if(action==="generate")return result(await withManualJob(uid,"manual_ai",body,b=>actionGenerate(uid,b)),200,origin);
+    if(action==="publish")return result(await withManualJob(uid,"manual_publish",body,b=>actionPublish(uid,b)),202,origin);
+    if(action==="reconcile")return result(await withManualJob(uid,"reconcile",body,b=>actionReconcile(uid,b)),200,origin);
     return result({error:"Unknown action"},400,origin);
   }catch(e){
     const safeError=String(e?.message||"Request failed")
