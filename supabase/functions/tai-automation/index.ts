@@ -170,8 +170,10 @@ async function actionPublish(uid,body) {
   if(locked?.length!==1)throw Object.assign(Error("Bài đang xử lý bởi phiên khác."),{status:409});
   try{
     const response=await mcpCall("upload_text",{title:p.content,user:Deno.env.get("UPLOAD_POST_PROFILE")||"default",platforms:["threads"],asyncUpload:true});
-    const rid=response?.request_id||response?.requestId||response?.data?.request_id||null;
-    const jid=response?.job_id||response?.jobId||null;
+    const rid=response?.request_id||response?.requestId||response?.data?.request_id||
+      response?.result?.request_id||response?.result?.data?.request_id||null;
+    const jid=response?.job_id||response?.jobId||response?.data?.job_id||
+      response?.result?.job_id||null;
     await db("posts?id=eq."+p.id+"&user_id=eq."+uid,{method:"PATCH",body:{status:rid?"processing":"paused",upload_post_request_id:rid,upload_post_job_id:jid,last_error:rid?null:"Đã gửi MCP nhưng không nhận request_id; cần kiểm tra thủ công trước khi thử lại."}});
     await audit(uid,"info","Đã gửi tới Upload-Post MCP; chờ đối soát kết quả.",p.id);
     return {ok:true,postId:p.id,requestId:rid,state:rid?"processing":"reconciliation_required",note:"Không tự động gửi lại bài khi kết quả bất định."};
@@ -187,7 +189,11 @@ async function actionReconcile(uid,body) {
   if(!p?.upload_post_request_id)throw Object.assign(Error("Bài chưa có request_id để đối soát."),{status:409});
   const remote=await mcpCall("get_status",{requestId:p.upload_post_request_id});
   const remoteStatus=String(remote?.status||remote?.data?.status||"unknown").toLowerCase();
-  const target=remoteStatus==="success"?"published":remoteStatus==="failed"?"failed":"processing";
+  const results=remote?.results||remote?.data?.results||[];
+  const threads=Array.isArray(results)?results.filter(x=>x.platform==="threads"):[];
+  const target=(threads.some(x=>x.success===true)||remoteStatus==="success")
+    ?"published":(threads.some(x=>x.success===false)||remoteStatus==="failed")
+    ?"failed":"processing";
   await db("posts?id=eq."+p.id+"&user_id=eq."+uid,{method:"PATCH",body:{status:target,...(target==="published"?{published_at:new Date().toISOString()}:{}),...(target==="failed"?{last_error:JSON.stringify(remote).slice(0,450)}:{})}});
   await audit(uid,target==="failed"?"error":"info","Đối soát Upload-Post: "+remoteStatus,p.id);
   return {ok:true,postId:p.id,status:target,remoteStatus,remote};
