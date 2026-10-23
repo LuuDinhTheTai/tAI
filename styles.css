@@ -39,3 +39,5 @@
  .log-toolbar .search-input{flex:1 1 100%;min-width:0}
  .log-entry-meta{gap:8px}
 }
+
+.activity-icon.error{background:#fdeced;color:#bf4858}
