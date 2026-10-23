@@ -61,20 +61,23 @@ async function mcpCall(tool,args) {
   if(session)await send({jsonrpc:"2.0",method:"notifications/initialized"});
   return await send({jsonrpc:"2.0",id:2,method:"tools/call",params:{name:tool,arguments:args}});
 }
-async function generateAI(prompt) {
+async function generateAI(prompt,priority="gemini") {
   const gemini=Deno.env.get("GEMINI_API_KEY");const groq=Deno.env.get("GROQ_API_KEY");const errs=[];
-  if(gemini)try{
-    const model=Deno.env.get("GEMINI_MODEL")||"gemini-2.5-flash-lite";
-    const r=await fetch("https://generativelanguage.googleapis.com/v1beta/models/"+encodeURIComponent(model)+":generateContent",{method:"POST",headers:{"Content-Type":"application/json","x-goog-api-key":gemini},body:JSON.stringify({contents:[{parts:[{text:prompt}]}],generationConfig:{temperature:0.75,maxOutputTokens:700}}),signal:AbortSignal.timeout(16000)});
-    const j=await r.json();if(!r.ok)throw Error("Gemini "+r.status);
-    const text=j.candidates?.[0]?.content?.parts?.map(p=>p.text||"").join("").trim();if(text)return {text,provider:"Gemini"};throw Error("Empty Gemini response")
-  }catch(e){errs.push(String(e).slice(0,100))}
-  if(groq)try{
-    const model=Deno.env.get("GROQ_MODEL")||"llama-3.3-70b-versatile";
-    const r=await fetch("https://api.groq.com/openai/v1/chat/completions",{method:"POST",headers:{"Content-Type":"application/json","Authorization":"Bearer "+groq},body:JSON.stringify({model,messages:[{role:"user",content:prompt}],temperature:0.7,max_tokens:600}),signal:AbortSignal.timeout(16000)});
-    const j=await r.json();if(!r.ok)throw Error("Groq "+r.status);
-    const text=j.choices?.[0]?.message?.content?.trim();if(text)return {text,provider:"Groq"};throw Error("Empty Groq response")
-  }catch(e){errs.push(String(e).slice(0,100))}
+  const order=priority==="groq"?["groq","gemini"]:["gemini","groq"];
+  for(const provider of order) {
+    if(provider==="gemini"&&gemini)try{
+      const model=Deno.env.get("GEMINI_MODEL")||"gemini-2.5-flash-lite";
+      const r=await fetch("https://generativelanguage.googleapis.com/v1beta/models/"+encodeURIComponent(model)+":generateContent",{method:"POST",headers:{"Content-Type":"application/json","x-goog-api-key":gemini},body:JSON.stringify({contents:[{parts:[{text:prompt}]}],generationConfig:{temperature:0.75,maxOutputTokens:700}}),signal:AbortSignal.timeout(16000)});
+      const j=await r.json();if(!r.ok)throw Error("Gemini "+r.status);
+      const text=j.candidates?.[0]?.content?.parts?.map(p=>p.text||"").join("").trim();if(text)return {text,provider:"Gemini"};throw Error("Empty Gemini response");
+    }catch(e){errs.push(String(e).slice(0,100))}
+    if(provider==="groq"&&groq)try{
+      const model=Deno.env.get("GROQ_MODEL")||"llama-3.3-70b-versatile";
+      const r=await fetch("https://api.groq.com/openai/v1/chat/completions",{method:"POST",headers:{"Content-Type":"application/json","Authorization":"Bearer "+groq},body:JSON.stringify({model,messages:[{role:"user",content:prompt}],temperature:0.7,max_tokens:600}),signal:AbortSignal.timeout(16000)});
+      const j=await r.json();if(!r.ok)throw Error("Groq "+r.status);
+      const text=j.choices?.[0]?.message?.content?.trim();if(text)return {text,provider:"Groq"};throw Error("Empty Groq response");
+    }catch(e){errs.push(String(e).slice(0,100))}
+  }
   throw Object.assign(Error(gemini||groq?"Các AI provider chưa trả nội dung: "+errs.join("; "):"Cần cấu hình GEMINI_API_KEY hoặc GROQ_API_KEY trong Supabase Secrets."),{status:503});
 }
 async function actionGenerate(uid,body) {
@@ -90,7 +93,7 @@ async function actionGenerate(uid,body) {
     "Tên: "+p.title,"Mô tả: "+String(p.description||"").slice(0,1200),
     "Giá tham khảo: "+(Number(p.price)>0?Number(p.price)+" "+p.currency:"không có giá xác nhận"),
     userPrompt?"Nguyên tắc bổ sung: "+userPrompt:""].join("\n");
-  const ai=await generateAI(prompt);
+  const ai=await generateAI(prompt, String(settings?.[0]?.config?.model||'gemini'));
   let text=ai.text.replace(/^["'“]|["'”]$/g,"").trim();
   const url=String(p.affiliate_url||"").trim();if(url){let u;try{u=new URL(url)}catch{}if(!u||!["http:","https:"].includes(u.protocol))throw Object.assign(Error("Link affiliate không hợp lệ."),{status:422})}
   const suffix="\n\nLiên kết tiếp thị"+(url?": "+url:".");
