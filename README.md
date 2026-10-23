@@ -82,3 +82,15 @@ Mã ứng dụng tAI Console phát triển trong phiên làm việc này để b
 Cloudflare Pages: chọn GitHub repository `LuuDinhTheTai/tAI`, production branch `main`, no framework preset, build command để trống, output directory `/` (root). Source files ở root repository.
 
 **Chú ý:** Supabase chưa có project cấu hình; frontend chỉ hiển thị demo cho đến khi thiết lập `SUPABASE_URL` và public anon/publishable key trong ứng dụng. Không đưa service-role key hoặc Upload-Post API key vào client.
+
+## Nhật ký hoạt động
+
+Dashboard có trang **Nhật ký hoạt động** tại `https://tai-console.pages.dev/#logs`. Không cần React/Vue: frontend dùng JavaScript thuần gọi Supabase PostgREST từ trình duyệt bằng JWT của tài khoản đã đăng nhập.
+
+- Nguồn: `public.job_logs` (RLS, mỗi tài khoản chỉ xem log của mình; chỉ backend được ghi).
+- Hiển thị 100 sự kiện gần nhất với bộ lọc Thông tin/Cảnh báo/Lỗi, tìm theo sự kiện hoặc ID bài đăng, mở chi tiết JSON.
+- Khi trang nhật ký đang mở, tự tải lại mỗi 30 giây; có nút **Làm mới** thủ công.
+- Edge Function `tai-automation` ghi cả hoạt động thành công lẫn lỗi tạo bài AI, gửi bài Upload-Post và đối soát. Không lưu API key/token hay toàn bộ prompt trong log.
+- Log thực thi nền tảng (`console.error`, request HTTP, thời gian thực thi) vẫn tra cứu trong Supabase Dashboard → Edge Functions → Logs, **không** đưa service-role key vào frontend.
+
+Chú ý: nhật ký không có sự kiện khi chưa chạy tác vụ; trạng thái đăng bài phải được đối soát với Upload-Post trước khi xác nhận đã đăng thành công.
