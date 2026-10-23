@@ -61,24 +61,78 @@ async function mcpCall(tool,args) {
   if(session)await send({jsonrpc:"2.0",method:"notifications/initialized"});
   return await send({jsonrpc:"2.0",id:2,method:"tools/call",params:{name:tool,arguments:args}});
 }
+// Resolve model availability at runtime; old Gemini 2.5 models may return 404 to newly provisioned keys.
+// Default to Flash-Lite models with free-tier availability, without changing account billing settings.
+async function availableGeminiModels(key) {
+  const r=await fetch("https://generativelanguage.googleapis.com/v1beta/models?pageSize=1000",{
+    headers:{"x-goog-api-key":key},
+    signal:AbortSignal.timeout(9000)
+  });
+  if(!r.ok)throw Error("Gemini models.list HTTP "+r.status);
+  const data=await r.json();
+  return new Set((data.models||[])
+    .filter(m=>Array.isArray(m.supportedGenerationMethods)&&m.supportedGenerationMethods.includes("generateContent"))
+    .map(m=>String(m.name||"").replace(/^models\//,"")));
+}
 async function generateAI(prompt,priority="gemini") {
-  const gemini=Deno.env.get("GEMINI_API_KEY");const groq=Deno.env.get("GROQ_API_KEY");const errs=[];
-  const order=priority==="groq"?["groq","gemini"]:["gemini","groq"];
-  for(const provider of order) {
-    if(provider==="gemini"&&gemini)try{
-      const model=Deno.env.get("GEMINI_MODEL")||"gemini-2.5-flash-lite";
-      const r=await fetch("https://generativelanguage.googleapis.com/v1beta/models/"+encodeURIComponent(model)+":generateContent",{method:"POST",headers:{"Content-Type":"application/json","x-goog-api-key":gemini},body:JSON.stringify({contents:[{parts:[{text:prompt}]}],generationConfig:{temperature:0.75,maxOutputTokens:700}}),signal:AbortSignal.timeout(16000)});
-      const j=await r.json();if(!r.ok)throw Error("Gemini "+r.status);
-      const text=j.candidates?.[0]?.content?.parts?.map(p=>p.text||"").join("").trim();if(text)return {text,provider:"Gemini"};throw Error("Empty Gemini response");
-    }catch(e){errs.push(String(e).slice(0,100))}
-    if(provider==="groq"&&groq)try{
+  const gemini=Deno.env.get("GEMINI_API_KEY");
+  const groq=Deno.env.get("GROQ_API_KEY");
+  const errors=[];
+  const providers=priority==="groq"?["groq","gemini"]:["gemini","groq"];
+  for(const provider of providers) {
+    if(provider==="gemini"&&gemini) {
+      // A manually configured model is attempted first only when it is in the accessible model catalogue.
+      const configured=String(Deno.env.get("GEMINI_MODEL")||"").replace(/^models\//,"").trim();
+      const choices=[configured,"gemini-3.5-flash-lite","gemini-3.1-flash-lite"]
+        .filter((name,i,items)=>name&&/^[a-z0-9._-]+$/.test(name)&&items.indexOf(name)===i);
+      let accessible=null;
+      try{accessible=await availableGeminiModels(gemini)}
+      catch(e){errors.push("Gemini model listing: "+String(e.message).slice(0,85))}
+      const models=accessible&&accessible.size>0?choices.filter(m=>accessible.has(m)):choices;
+      if(!models.length)errors.push("Gemini: key does not list supported Flash-Lite text models");
+      for(const model of models.slice(0,3)) {
+        try {
+          const r=await fetch("https://generativelanguage.googleapis.com/v1beta/models/"+model+":generateContent",{
+            method:"POST",
+            headers:{"Content-Type":"application/json","x-goog-api-key":gemini},
+            body:JSON.stringify({
+              contents:[{parts:[{text:prompt}]}],
+              generationConfig:{temperature:0.7,maxOutputTokens:2048}
+            }),
+            signal:AbortSignal.timeout(20000)
+          });
+          if(!r.ok) {
+            errors.push("Gemini "+model+": HTTP "+r.status);
+            // Do not burn the quota by retrying other models if quota was exhausted.
+            if(r.status===429)break;
+            continue;
+          }
+          const j=await r.json();
+          const text=j.candidates?.[0]?.content?.parts?.map(p=>p.text||"").join("").trim();
+          if(text)return {text,provider:"Gemini ("+model+")"};
+          errors.push("Gemini "+model+": empty text response");
+        } catch(e) {
+          errors.push("Gemini "+model+": "+String(e?.name==="TimeoutError"?"timeout":e?.message||e).slice(0,90));
+        }
+      }
+    }
+    if(provider==="groq"&&groq)try {
       const model=Deno.env.get("GROQ_MODEL")||"llama-3.3-70b-versatile";
-      const r=await fetch("https://api.groq.com/openai/v1/chat/completions",{method:"POST",headers:{"Content-Type":"application/json","Authorization":"Bearer "+groq},body:JSON.stringify({model,messages:[{role:"user",content:prompt}],temperature:0.7,max_tokens:600}),signal:AbortSignal.timeout(16000)});
-      const j=await r.json();if(!r.ok)throw Error("Groq "+r.status);
-      const text=j.choices?.[0]?.message?.content?.trim();if(text)return {text,provider:"Groq"};throw Error("Empty Groq response");
-    }catch(e){errs.push(String(e).slice(0,100))}
+      const r=await fetch("https://api.groq.com/openai/v1/chat/completions",{
+        method:"POST",
+        headers:{"Content-Type":"application/json","Authorization":"Bearer "+groq},
+        body:JSON.stringify({model,messages:[{role:"user",content:prompt}],temperature:0.7,max_tokens:750}),
+        signal:AbortSignal.timeout(16000)
+      });
+      if(!r.ok)throw Error("HTTP "+r.status);
+      const j=await r.json();
+      const text=j.choices?.[0]?.message?.content?.trim();
+      if(text)return {text,provider:"Groq"};
+      throw Error("Empty Groq response");
+    }catch(e){errors.push("Groq: "+String(e.message).slice(0,100))}
   }
-  throw Object.assign(Error(gemini||groq?"Các AI provider chưa trả nội dung: "+errs.join("; "):"Cần cấu hình GEMINI_API_KEY hoặc GROQ_API_KEY trong Supabase Secrets."),{status:503});
+  if(!gemini&&!groq)throw Object.assign(Error("Chưa cấu hình GEMINI_API_KEY hoặc GROQ_API_KEY trong Supabase Secrets."),{status:503});
+  throw Object.assign(Error("Không thể tạo nội dung AI. "+errors.join("; ").slice(0,350)),{status:503});
 }
 async function actionGenerate(uid,body) {
   if(!uuid(body.productId))throw Object.assign(Error("Thiếu productId hợp lệ."),{status:400});
