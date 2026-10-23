@@ -41,3 +41,15 @@
 }
 
 .activity-icon.error{background:#fdeced;color:#bf4858}
+
+
+/* Threads profile metrics are measured independently of individual posts. */
+.profile-analytics-panel{padding:24px;margin:0 0 20px}
+.profile-analytics-panel .panel-heading{display:flex;flex-wrap:wrap;gap:12px;align-items:flex-start}
+.profile-analytics-panel .panel-heading .btn{white-space:nowrap}
+.profile-metrics-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:11px;margin:16px 0 14px}
+.profile-metric{display:flex;flex-direction:column;gap:10px;background:#f5f9f7;border:1px solid var(--border);padding:18px;border-radius:12px}
+.profile-metric small{color:var(--muted);font-size:11px;font-weight:650;line-height:1.4}
+.profile-metric strong{font-size:26px;color:var(--ink);font-variant-numeric:tabular-nums}
+@media(max-width:920px){.profile-metrics-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media(max-width:460px){.profile-analytics-panel{padding:16px}.profile-metrics-grid{gap:8px}.profile-metric{padding:13px}.profile-metric strong{font-size:22px}}
