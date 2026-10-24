@@ -1,0 +1,14 @@
+export type PostStatus="draft"|"scheduled"|"processing"|"paused"|"published"|"failed"|string;
+export interface Post {id:string;user_id:string;product_id:string|null;content:string;status:PostStatus;provider?:string|null;views?:number|null;likes?:number|null;replies?:number|null;reposts?:number|null;created_at:string;published_at?:string|null;threads_post_id?:string|null;upload_post_request_id?:string|null;last_error?:string|null}
+export interface Product{id:string;user_id:string;title:string;category?:string|null;description?:string|null;price?:number|null;affiliate_url:string;status?:string|null;created_at?:string}
+export interface JobRun{id:string;user_id:string;kind:string;trigger_source:string;status:string;stage:string;progress:number;message:string;product_id?:string|null;post_id?:string|null;started_at:string;updated_at:string;finished_at?:string|null}
+export interface JobLog{id:string;job_run_id?:string|null;user_id:string;stage?:string|null;event_status?:string|null;level:string;event:string;created_at:string;post_id?:string|null;details?:Record<string,unknown>|null}
+export interface AgentRun{id:string;slot_date:string;status:string;mode:string;note?:string|null;started_at:string}
+export interface ProfileSnapshot{id:string;profile_username:string;followers?:number|null;weekly_impressions?:number|null;account_impressions?:number|null;likes?:number|null;comments?:number|null;shares?:number|null;clicks?:number|null;week_start?:string|null;week_end?:string|null;fetched_at?:string|null}
+export interface AgentSettings{agent_enabled:boolean;agent_mode:"draft"|"publish";auto_publish:boolean;require_review:boolean;daily_limit:number;model:"gemini"|"groq";fallback:"gemini"|"groq";prompt?:string;[key:string]:unknown}
+export interface DataState{posts:Post[];products:Product[];jobs:JobRun[];logs:JobLog[];agentRuns:AgentRun[];profile:ProfileSnapshot|null;settings:AgentSettings;updatedAt:Date|null}
+export const DEFAULT_SETTINGS:AgentSettings={agent_enabled:false,agent_mode:"draft",auto_publish:false,require_review:true,daily_limit:1,model:"gemini",fallback:"groq",prompt:""};
+export const STATUS_LABEL:Record<string,string>={draft:"Bản nháp",scheduled:"Đã lên lịch",processing:"Đang xử lý",paused:"Tạm dừng",published:"Đã đăng",failed:"Thất bại",running:"Đang chạy",completed:"Hoàn thành",skipped:"Bỏ qua"};
+export const number=(n:number|null|undefined)=>n===null||n===undefined?"—":new Intl.NumberFormat("vi-VN").format(n);
+export const date=(s:string|null|undefined)=>s?new Date(s).toLocaleString("vi-VN",{timeZone:"Asia/Ho_Chi_Minh",day:"2-digit",month:"2-digit",hour:"2-digit",minute:"2-digit"}):"—";
+export const validUrl=(s:string)=>{try{const u=new URL(s);return u.protocol==="https:"&&Boolean(u.hostname)}catch{return false}};
