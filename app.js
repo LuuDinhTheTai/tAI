@@ -372,8 +372,12 @@ async function ensureSession(){if(!isReady()||!state.session)return false;if(Dat
 async function fetchActivityLogs(){
   if(!await ensureSession())throw Error('Bạn cần đăng nhập để xem nhật ký.');
   try{
-    const [logs,jobs]=await Promise.all([request('/rest/v1/job_logs?select=id,job_run_id,stage,event_status,post_id,event,level,details,created_at&order=created_at.desc&limit=200'),request('/rest/v1/job_runs?select=id,kind,trigger_source,status,stage,progress,message,post_id,started_at,updated_at,finished_at&order=started_at.desc&limit=40')]);
-    state.jobRuns=jobs;state.logs=logs;
+    const [logs,jobs,posts]=await Promise.all([
+      request('/rest/v1/job_logs?select=id,job_run_id,stage,event_status,post_id,event,level,details,created_at&order=created_at.desc&limit=200'),
+      request('/rest/v1/job_runs?select=id,kind,trigger_source,status,stage,progress,message,post_id,started_at,updated_at,finished_at&order=started_at.desc&limit=40'),
+      request('/rest/v1/posts?select=*&order=created_at.desc&limit=100')
+    ]);
+    state.jobRuns=jobs;state.logs=logs;state.posts=posts;
     state.logsError=null;
     state.logsUpdated=new Date();
     return logs;
