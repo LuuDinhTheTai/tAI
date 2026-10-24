@@ -49,3 +49,34 @@ Verified on Supabase Edge Function v12+ with a server-side `job-health` request:
 - Supabase Realtime for near-instant updates instead of 30-second polling.
 - Alert on failed or stuck jobs, with daily digest and retention policy.
 - Per-request provider latency/token/price accounting when those provider APIs return this information reliably. Avoid guessing token cost.
+
+
+## Automatic Threads reconciliation (fixed October 24, 2026)
+
+Upload-Post's Hosted MCP status response can be nested under `result`, `data`,
+`structuredContent` or a text-content JSON block. `tai-automation` normalizes
+these envelopes before checking the exact `request_id` and the result for
+`platform=threads`. A batch status of `completed` alone does **not** prove
+a successful Threads publication.
+
+A Threads result with `success=true` and a valid `platform_post_id` confirms
+publication. The worker then updates `posts.status=published`,
+`posts.threads_post_id`, `published_at` (from the provider timestamp) and
+clears `last_error`. Unknown/unfinished results remain pending, explicit
+failure is recorded as failed, and existing confirmed publications are not
+downgraded by stale responses. Never re-upload an uncertain post just to
+discover its status.
+
+The separate job `tai-threads-reconcile` (`*/30 * * * *`, twice hourly)
+calls `agent-reconcile` with the scheduler key from Supabase Vault.
+It scans only `processing` and `paused` posts with existing
+`upload_post_request_id`, checks up to 8 posts per user, and does **not** call
+an AI model or create/publish any new Threads posts. When none are pending,
+the endpoint returns `results:[]` without creating a job record.
+
+**Production verification:** a previously stuck Threads post with
+`upload_post_request_id=6412bd8ea3dd43ec8c5828736ba20d7e`
+was verified with an HTTP 200 reconciliation call, updated to
+`published` with `threads_post_id=17963277345234764` and its provider
+publication time. A second call returned `results:[]`, confirming
+idempotent behavior.
