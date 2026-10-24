@@ -118,7 +118,7 @@ export function AutomationPage(){
  const {data,session,run,notify,refresh,busy}=useApp();
  const [cfg,setCfg]=useState<AgentSettings>({...data.settings});const [saving,setSaving]=useState(false);
  useEffect(()=>setCfg({...data.settings}),[data.settings]);
- const set=<K extends keyof AgentSettings>(k:K,v:AgentSettings[K])=>setCfg(prev=>({...prev,[k]:v}));
+ const set=<K extends keyof AgentSettings,>(k:K,v:AgentSettings[K])=>setCfg(prev=>({...prev,[k]:v}));
  async function save(){if(!session)return;if(cfg.model===cfg.fallback){notify("AI chính và AI dự phòng phải khác nhau.","error");return}
  const isAutopublish=cfg.agent_enabled&&cfg.agent_mode==="publish"&&cfg.auto_publish&&!cfg.require_review;
  if(isAutopublish&&!window.confirm("Xác nhận bật tự đăng Threads công khai không qua duyệt? Hãy chắc chắn tài khoản Upload-Post và sản phẩm affiliate đã đúng."))return;
