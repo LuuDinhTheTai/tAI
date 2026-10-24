@@ -28,6 +28,115 @@ const demoProducts=[
 const demoLogs=[{id:'l1',event:'Bài viết đã được đăng thành công',level:'info',created_at:'2026-10-23T09:20:00+07:00'},{id:'l2',event:'AI Gemini tạo nội dung mới',level:'info',created_at:'2026-10-23T09:10:00+07:00'},{id:'l3',event:'Đã thêm bài viết vào hàng đợi',level:'info',created_at:'2026-10-23T08:00:00+07:00'},{id:'l4',event:'Kiểm tra kết nối Upload-Post',level:'warning',created_at:'2026-10-22T16:10:00+07:00'}];
 const DEFAULTS={model:'gemini',fallback:'groq',daily_limit:1,agent_enabled:false,agent_mode:'draft',auto_publish:false,require_review:true,prompt:'Viết bài Threads affiliate tự nhiên, trung thực, ngắn gọn. Có hook, lợi ích thực tế và lời kêu gọi hành động. Ghi rõ đây là nội dung có liên kết tiếp thị. Không bịa trải nghiệm sử dụng hay giá sản phẩm.'};
 const state={page:'overview',period:30,tab:'all',search:'',productsSearch:'',posts:demoPosts,products:demoProducts,logs:demoLogs,settings:{...DEFAULTS},agentRuns:[],jobRuns:[],jobKind:'all',liveSelectedJobId:null,liveSocketStatus:'idle',profileMetrics:null,demo:true,config:readConfig(),session:null,backend:null,loading:false,updated:new Date(),modal:null,logLevel:'all',logSearch:'',logsError:null,logsUpdated:null,logRefreshing:false};
+let wsAI=null,wsAIUser='',wsAIHeartbeat=null,wsAIRetry=null,wsAISeq=0,wsAIJoinRef=null;
+function isAILiveRoute(){return getPage()==="live"||getPage()==="logs"}
+function paintAILive(){
+ const root=document.querySelector("#ai-live-root");
+ if(root&&isAILiveRoute())root.innerHTML=aiLiveContent();
+}
+function aiLiveConnectionStatus(status){
+ if(state.liveSocketStatus===status)return;
+ state.liveSocketStatus=status;paintAILive();
+}
+function closeAILiveSocket(){
+ if(wsAIRetry){clearTimeout(wsAIRetry);wsAIRetry=null}
+ if(wsAIHeartbeat){clearInterval(wsAIHeartbeat);wsAIHeartbeat=null}
+ const old=wsAI;wsAI=null;wsAIUser="";wsAIJoinRef=null;
+ if(old&&old.readyState<=1){try{old.close(1000,"Page inactive")}catch{}}
+ state.liveSocketStatus="idle";
+}
+function liveSend(topic,event,payload,joinRef=null){
+ if(!wsAI||wsAI.readyState!==1)return;
+ wsAI.send(JSON.stringify({topic,event,payload,ref:String(++wsAISeq),join_ref:joinRef}));
+}
+function updateLiveAuth(token){
+ if(wsAI&&wsAI.readyState===1&&wsAIJoinRef&&token){
+   liveSend("realtime:ai-progress-"+wsAIUser,"access_token",{access_token:token},wsAIJoinRef);
+ }
+}
+function mergeAIRealtime(table,record){
+ if(!state.session?.user?.id || record?.user_id!==state.session.user.id)return;
+ if(table==="job_runs"){
+   const old=(state.jobRuns||[]).filter(j=>j.id!==record.id);
+   state.jobRuns=[record,...old].sort((a,b)=>Date.parse(b.started_at)-Date.parse(a.started_at)).slice(0,40);
+ }else if(table==="job_logs"){
+   const old=(state.logs||[]).filter(j=>j.id!==record.id);
+   state.logs=[record,...old].sort((a,b)=>Date.parse(b.created_at)-Date.parse(a.created_at)).slice(0,200);
+ }else if(table==="posts"){
+   const existing=(state.posts||[]).find(j=>j.id===record.id);
+   if(existing){state.posts=state.posts.map(j=>j.id===record.id?{...j,...record}:j)}
+   else state.posts=[record,...state.posts];
+ }else return;
+ state.logsUpdated=new Date();
+ paintAILive();
+}
+async function connectAILiveSocket(){
+ if(!isAILiveRoute()||state.demo||!state.session?.user?.id){
+   closeAILiveSocket();return;
+ }
+ const userId=state.session.user.id;
+ if(wsAI&&wsAIUser===userId&&wsAI.readyState<=1)return;
+ if(!await ensureSession()||!isAILiveRoute()||state.demo)return;
+ let socketUrl;
+ try{
+   const origin=new URL(state.config.url);
+   if(origin.protocol!=="https:")throw Error("Invalid Supabase URL");
+   socketUrl=new URL("/realtime/v1/websocket",origin);
+   socketUrl.protocol="wss:";
+   socketUrl.searchParams.set("apikey",state.config.key);
+   socketUrl.searchParams.set("vsn","1.0.0");
+ }catch{aiLiveConnectionStatus("offline");return}
+ closeAILiveSocket();
+ aiLiveConnectionStatus("connecting");
+ let socket;
+ try{socket=new WebSocket(socketUrl.toString())}
+ catch{aiLiveConnectionStatus("offline");return}
+ wsAI=socket;wsAIUser=userId;
+ const topic="realtime:ai-progress-"+userId;
+ socket.onopen=()=>{
+   if(wsAI!==socket)return;
+   const ref=String(++wsAISeq);
+   wsAIJoinRef=ref;
+   socket.send(JSON.stringify({topic,event:"phx_join",payload:{
+     access_token:state.session.access_token,
+     config:{private:false,broadcast:{ack:false,self:false},presence:{enabled:false},
+       postgres_changes:[
+         {event:"*",schema:"public",table:"job_runs",filter:"user_id=eq."+userId},
+         {event:"INSERT",schema:"public",table:"job_logs",filter:"user_id=eq."+userId},
+         {event:"UPDATE",schema:"public",table:"posts",filter:"user_id=eq."+userId}
+       ]}
+   },ref,join_ref:ref}));
+   wsAIHeartbeat=setInterval(()=>liveSend("phoenix","heartbeat",{},null),20000);
+ };
+ socket.onmessage=event=>{
+   if(wsAI!==socket)return;
+   let msg;try{msg=JSON.parse(event.data)}catch{return}
+   if(msg.event==="phx_reply"&&msg.topic===topic&&msg.ref===wsAIJoinRef){
+     if(msg.payload?.status==="ok"){
+       aiLiveConnectionStatus("connected");
+       // Catch changes between the first REST read and successful subscription.
+       fetchActivityLogs().then(()=>paintAILive()).catch(()=>{});
+     }else{aiLiveConnectionStatus("offline");socket.close()}
+   }else if(msg.event==="postgres_changes"&&msg.topic===topic){
+     const d=msg.payload?.data;
+     if(d?.table&&d?.record)mergeAIRealtime(d.table,d.record);
+   }else if((msg.event==="phx_error"||msg.event==="phx_close")&&msg.topic===topic){
+     aiLiveConnectionStatus("offline");socket.close();
+   }else if(msg.event==="system"&&msg.payload?.status==="error"){
+     aiLiveConnectionStatus("offline");socket.close();
+   }
+ };
+ socket.onerror=()=>{if(wsAI===socket)aiLiveConnectionStatus("offline")};
+ socket.onclose=()=>{
+   if(wsAI!==socket)return;
+   wsAI=null;wsAIJoinRef=null;
+   if(wsAIHeartbeat){clearInterval(wsAIHeartbeat);wsAIHeartbeat=null}
+   aiLiveConnectionStatus("offline");
+   if(isAILiveRoute()&&state.session&&!state.demo&&!wsAIRetry){
+     wsAIRetry=setTimeout(()=>{wsAIRetry=null;connectAILiveSocket()},5000);
+   }
+ };
+}
 function readConfig(){const defaults={url:'https://idovyelypzisdngfcecc.supabase.co',key:'sb_publishable_kaFpG58YI0SNa-8gfWcqFw_s2HmLEip'};try{return {...defaults,...JSON.parse(localStorage.getItem('tai.supabase.config')||'{}')}}catch{return defaults}}
 function readSession(){try{return JSON.parse(sessionStorage.getItem('tai.session')||'null')}catch{return null}}
 state.session=readSession();
@@ -242,7 +351,7 @@ function automationPage(){const s=state.settings;return `${pageHeader('AI CONTRO
 <hr class="divider"><h3 class="section-title">Cấu hình mô hình AI</h3><p class="section-description">AI Engine chạy ở Supabase Edge Functions. Frontend chỉ lưu cấu hình được phép.</p><div class="field-row"><div class="field"><label for="ai-model">Nhà cung cấp chính</label><select id="ai-model"><option value="gemini" ${s.model==='gemini'?'selected':''}>Google Gemini</option><option value="groq" ${s.model==='groq'?'selected':''}>Groq</option></select></div><div class="field"><label for="ai-fallback">Nhà cung cấp dự phòng</label><select id="ai-fallback"><option value="groq" ${s.fallback==='groq'?'selected':''}>Groq</option><option value="gemini" ${s.fallback==='gemini'?'selected':''}>Google Gemini</option></select></div></div><div class="field"><label for="ai-prompt">System prompt tạo nội dung</label><textarea id="ai-prompt" rows="6">${escapeHtml(s.prompt)}</textarea><div class="field-hint">Không đưa API key vào prompt. AI luôn phải kiểm chứng thông tin sản phẩm.</div></div><hr class="divider"><h3 class="section-title">Quy tắc xuất bản</h3><div class="field"><label for="ai-limit">Giới hạn bài/ngày</label><input id="ai-limit" type="number" min="0" max="1" value="${Number(s.daily_limit)??1}"><span class="field-hint">Chạy tự động tối đa 1 lượt tạo bài/ngày để giữ chi phí thấp.</span></div><div class="toggle-row"><div><strong>Tự động xuất bản</strong><span>Chỉ hoạt động trong chế độ Tự đăng và khi tắt duyệt trước.</span></div><label class="switch"><input type="checkbox" id="ai-autopublish" ${s.auto_publish?'checked':''}><span class="switch-slider"></span></label></div><div class="toggle-row"><div><strong>Duyệt bài trước khi đăng</strong><span>Khuyến nghị bật khi mới vận hành.</span></div><label class="switch"><input type="checkbox" id="ai-review" ${s.require_review?'checked':''}><span class="switch-slider"></span></label></div></section><aside class="panel setting-panel"><h3 class="section-title">Tình trạng dịch vụ</h3><p class="section-description">Các tích hợp cần cấu hình phía server.</p>${[['Supabase Database',!state.demo],['AI Provider',Boolean(state.backend?.providers?.gemini||state.backend?.providers?.groq)],['Upload-Post MCP',Boolean(state.backend?.providers?.uploadPost)],['Supabase Cron',true]].map(([t,active])=>`<div class="toggle-row"><div><strong>${t}</strong><span>${active?'Đã kết nối dữ liệu':'Chưa xác minh backend'}</span></div><span class="tag ${active?'published':'paused'}">${active?'Connected':'Pending'}</span></div>`).join('')}<div class="callout">${svg('lock')} Không nhập API key AI hoặc Upload-Post trực tiếp trên dashboard. Chỉ lưu các khóa này ở Supabase Secrets.</div></aside></div>`}
 function settingsPage(){return `${pageHeader('WORKSPACE SETTINGS','Kết nối Supabase','Thiết lập dữ liệu backend cho tAI Console. Mọi kết nối sử dụng quyền truy cập của người dùng.')}${sourceNotice()}<div class="settings-layout"><section class="panel setting-panel"><h3 class="section-title">Thông tin dự án</h3><p class="section-description">Chỉ nhập Project URL và publishable/anon key. Đây là các giá trị được thiết kế để dùng trong trình duyệt khi bật Row Level Security.</p><form id="connection-form"><div class="field"><label for="sb-url">Supabase Project URL</label><input id="sb-url" type="url" placeholder="https://xxxxx.supabase.co" autocomplete="off" required value="${escapeHtml(state.config.url||'')}"></div><div class="field"><label for="sb-key">Supabase Publishable Key</label><input id="sb-key" placeholder="sb_publishable_... hoặc anon key" autocomplete="off" required value="${escapeHtml(state.config.key||'')}"><div class="field-hint">Không nhập service_role hoặc secret key. Dữ liệu này được lưu trên trình duyệt hiện tại.</div></div><div class="button-group"><button class="btn btn-primary" type="submit">${svg('link')} Lưu kết nối</button><button class="btn btn-soft" type="button" data-action="disconnect">${svg('x')} Xóa cấu hình</button></div></form><hr class="divider"><div class="connection-status">${svg(state.session?'check-circle':'lock')}<div><strong>${state.session?'Đã đăng nhập Supabase':'Trạng thái xác thực'}</strong><span>${state.session?escapeHtml(state.session.user?.email||'Phiên đã xác thực'):'Chưa có phiên đăng nhập hợp lệ'}</span></div></div>${isReady()?state.session?`<button class="btn btn-soft" data-action="sign-out">${svg('log-out')} Đăng xuất</button>`:`<form id="auth-form"><div class="field"><label for="auth-email">Email</label><input type="email" id="auth-email" autocomplete="username" required></div><div class="field"><label for="auth-pass">Mật khẩu</label><input type="password" id="auth-pass" autocomplete="current-password" required></div><button class="btn btn-primary" type="submit">${svg('lock')} Đăng nhập Supabase</button></form>`:'<div class="callout">'+svg('info')+' Lưu kết nối để kích hoạt đăng nhập qua Supabase Auth.</div>'}</section><aside class="panel setting-panel"><h3 class="section-title">Hướng dẫn kết nối</h3><p class="section-description">Cấu hình một lần, không cần Cloudflare Worker backend.</p><ol class="help-list"><li>Tạo dự án trên Supabase.</li><li>Chạy SQL trong file <code>supabase/schema.sql</code> của repository.</li><li>Bật Email authentication và tạo một người dùng trong Supabase Auth.</li><li>Điền Project URL và publishable key.</li><li>Đăng nhập bằng tài khoản đã tạo.</li><li>Cấu hình CORS phù hợp với domain dashboard (nếu dùng Edge Functions).</li></ol><hr class="divider"><h3 class="section-title">Bảo mật</h3><ul class="help-list"><li>Bật RLS cho tất cả bảng chứa dữ liệu người dùng.</li><li>Không đưa service_role key vào trình duyệt hoặc GitHub.</li><li>Cron và Upload-Post chạy riêng trong Supabase backend.</li><li>Dashboard không gọi Upload-Post MCP trực tiếp.</li></ul></aside></div>`}
 const pages={overview:overview,posts:postsPage,products:productsPage,analytics:analyticsPage,logs:aiLivePage,live:aiLivePage,automation:automationPage,settings:settingsPage};
-function render(){state.page=getPage();$('#content').innerHTML=pages[state.page]();$('#breadcrumb-page').textContent={overview:'Tổng quan',posts:'Bài đăng',products:'Sản phẩm',analytics:'Phân tích',logs:'AI trực tiếp',live:'AI trực tiếp',automation:'AI & Tự động hóa',settings:'Cài đặt'}[state.page];$('#nav-post-count').textContent=state.posts.filter(p=>p.status==='scheduled').length;$('#profile-caption').textContent=state.demo?'Chế độ Demo':state.session?.user?.email||'Chưa đăng nhập';$('#sidebar-signout').hidden=!state.session;$('#footer-source').textContent=`Nguồn: ${state.demo?'Demo minh họa':'Supabase'} · Cập nhật ${new Date(state.updated).toLocaleTimeString('vi-VN',{hour:'2-digit',minute:'2-digit'})}`;$$('.nav-link').forEach(a=>{a.classList.toggle('selected',a.dataset.page===state.page);a.getAttribute('aria-current')&&a.removeAttribute('aria-current');if(a.dataset.page===state.page)a.setAttribute('aria-current','page')});refreshStaticIcons();}
+function render(){state.page=getPage();$('#content').innerHTML=pages[state.page]();$('#breadcrumb-page').textContent={overview:'Tổng quan',posts:'Bài đăng',products:'Sản phẩm',analytics:'Phân tích',logs:'AI trực tiếp',live:'AI trực tiếp',automation:'AI & Tự động hóa',settings:'Cài đặt'}[state.page];$('#nav-post-count').textContent=state.posts.filter(p=>p.status==='scheduled').length;$('#profile-caption').textContent=state.demo?'Chế độ Demo':state.session?.user?.email||'Chưa đăng nhập';$('#sidebar-signout').hidden=!state.session;$('#footer-source').textContent=`Nguồn: ${state.demo?'Demo minh họa':'Supabase'} · Cập nhật ${new Date(state.updated).toLocaleTimeString('vi-VN',{hour:'2-digit',minute:'2-digit'})}`;$$('.nav-link').forEach(a=>{a.classList.toggle('selected',a.dataset.page===state.page);a.getAttribute('aria-current')&&a.removeAttribute('aria-current');if(a.dataset.page===state.page)a.setAttribute('aria-current','page')});refreshStaticIcons();if(isAILiveRoute())void connectAILiveSocket();else closeAILiveSocket();}
 function closeMobile(){$('#sidebar').classList.remove('open');$('#mobile-scrim').hidden=true}
 function modal(title,caption,inner,submitLabel,formId){$('#modal-root').innerHTML=`<div class="modal-backdrop" role="presentation"><div class="modal" role="dialog" aria-modal="true" aria-labelledby="modal-title"><div class="modal-header"><div><h2 id="modal-title">${title}</h2><p>${caption}</p></div><button class="icon-button modal-close" data-action="modal-close" aria-label="Đóng">${svg('x')}</button></div><form id="${formId}">${inner}<div class="modal-footer"><button type="button" class="btn btn-soft" data-action="modal-close">Hủy</button><button class="btn btn-primary" type="submit">${svg('check-circle')} ${submitLabel}</button></div></form></div></div>`;setTimeout(()=>$('#modal-root input, #modal-root textarea')?.focus(),40)}
 function showAIDraftModal(){if(state.demo){toast('Đăng nhập Supabase trước khi dùng AI.',true);return}if(!state.products.length){toast('Thêm một sản phẩm affiliate trước khi tạo bài AI.',true);return}modal('AI tạo bản nháp','Bản nháp sẽ được lưu vào Supabase, không tự đăng Threads.',`<div class="field"><label for="ai-product">Chọn sản phẩm affiliate</label><select id="ai-product" required>${state.products.filter(p=>p.status==='active').map(p=>`<option value="${escapeHtml(p.id)}">${escapeHtml(p.title)}</option>`).join('')}</select></div>`,'Tạo bản nháp AI','ai-draft-form')}
@@ -251,7 +360,7 @@ function showProductModal(){modal('Thêm sản phẩm','Lưu sản phẩm affili
 function validExternalUrl(s){try{const u=new URL(s);return ['http:','https:'].includes(u.protocol)?u.href:null}catch{return null}}
 async function request(path,options={}){const response=await fetch(`${safeUrl()}${path}`,{...options,headers:authHeaders(options.headers||{})});const text=await response.text();let body;try{body=JSON.parse(text)}catch{body=text}if(!response.ok)throw Error(body?.msg||body?.message||body?.error_description||body?.error||`HTTP ${response.status}`);return body}
 async function callAutomation(action,fields={}){if(!await ensureSession())throw Error('Cần đăng nhập Supabase.');return request('/functions/v1/tai-automation',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action,...fields})})}
-async function ensureSession(){if(!isReady()||!state.session)return false;if(Date.now()<Number(state.session.expires_at||0)*1000-60000)return true;try{const body=await request('/auth/v1/token?grant_type=refresh_token',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({refresh_token:state.session.refresh_token})});state.session={...body,expires_at:Math.floor(Date.now()/1000)+body.expires_in};sessionStorage.setItem('tai.session',JSON.stringify(state.session));return true}catch{state.session=null;sessionStorage.removeItem('tai.session');return false}}
+async function ensureSession(){if(!isReady()||!state.session)return false;if(Date.now()<Number(state.session.expires_at||0)*1000-60000)return true;try{const body=await request('/auth/v1/token?grant_type=refresh_token',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({refresh_token:state.session.refresh_token})});state.session={...body,expires_at:Math.floor(Date.now()/1000)+body.expires_in};sessionStorage.setItem('tai.session',JSON.stringify(state.session));updateLiveAuth(state.session.access_token);return true}catch{state.session=null;sessionStorage.removeItem('tai.session');return false}}
 async function fetchActivityLogs(){
   if(!await ensureSession())throw Error('Bạn cần đăng nhập để xem nhật ký.');
   try{
@@ -274,14 +383,20 @@ document.addEventListener('click',async e=>{const selectLive=e.target.closest('[
 document.addEventListener('change',e=>{if(e.target.id==='period'){state.period=Number(e.target.value);render()}if(e.target.id==='log-level'){state.logLevel=e.target.value;const target=$('#logs-content');if(target)target.innerHTML=activityLogRows()}if(e.target.id==='job-kind'){state.jobKind=e.target.value;render()}});
 document.addEventListener('input',e=>{if(e.target.id==='log-search'){state.logSearch=e.target.value;const target=$('#logs-content');if(target)target.innerHTML=activityLogRows();return}if(e.target.id==='post-search'){state.search=e.target.value;const selection=e.target.selectionStart;const input=e.target;const t=$('.big-table');if(t){let arr=state.posts.filter(p=>(state.tab==='all'||p.status===state.tab)&&p.content.toLowerCase().includes(state.search.toLowerCase()));t.innerHTML=postTable(arr,true)}return}if(e.target.id==='product-search'){state.productsSearch=e.target.value;const active=document.activeElement;const start=active.selectionStart;render();$('#product-search')?.focus();$('#product-search')?.setSelectionRange(start,start)}});
 document.addEventListener('submit',handleSubmit);
-window.addEventListener('hashchange',()=>{closeMobile();render();if(getPage()==='logs'&&!state.demo){fetchActivityLogs().then(render).catch(render)}});
+window.addEventListener('hashchange',()=>{closeMobile();render();if(isAILiveRoute()&&!state.demo){fetchActivityLogs().then(paintAILive).catch(paintAILive)}});
 setInterval(async()=>{
- if(getPage()!=='logs'||state.demo||!state.session||state.logRefreshing||document.hidden)return;
+ if(!isAILiveRoute()||state.demo||!state.session||state.logRefreshing||document.hidden)return;
+ // Realtime delivers immediate updates. Periodic REST refresh recovers missed events
+ // after tab suspension, temporary WebSocket outages, or initial subscription delays.
  state.logRefreshing=true;
- try{await fetchActivityLogs();if(document.activeElement?.id==='log-search'){const target=$('#logs-content');if(target)target.innerHTML=activityLogRows();const j=$('#jobs-content');if(j){const holder=document.createElement('div');holder.innerHTML=jobTimeline();const fresh=holder.querySelector('#jobs-content');if(fresh)j.replaceWith(fresh)}}else render()}
- catch(e){if($('#logs-content'))render()}
+ try{await ensureSession();await fetchActivityLogs();paintAILive()}
+ catch{if(state.liveSocketStatus!=="connected")aiLiveConnectionStatus("offline")}
  finally{state.logRefreshing=false}
 },30000);
+document.addEventListener('visibilitychange',()=>{
+ if(document.hidden){closeAILiveSocket()}
+ else if(isAILiveRoute()&&!state.demo){fetchActivityLogs().then(paintAILive).catch(()=>{});void connectAILiveSocket()}
+});
 $('#mobile-menu').addEventListener('click',()=>{$('#sidebar').classList.toggle('open');$('#mobile-scrim').hidden=!$('#sidebar').classList.contains('open')});$('#mobile-scrim').addEventListener('click',closeMobile);
 $('#top-refresh').addEventListener('click',()=>handleAction('refresh'));$('#top-avatar').addEventListener('click',()=>location.hash='settings');$('#sidebar-signout').addEventListener('click',()=>handleAction('sign-out'));
 if(isReady()&&state.session)loadLive();else render();
