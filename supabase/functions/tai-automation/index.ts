@@ -519,6 +519,37 @@ async function syncUploadPostProfile(uid){
   return {profile,followers:row.followers,account_impressions:row.account_impressions,
     weekly_impressions:row.weekly_impressions,week_start:row.week_start,week_end:row.week_end};
 }
+// Lightweight reconciliation: read-only Upload-Post check, no AI call and no post creation.
+// Scheduled every 30 minutes so async publishing is not stuck until the nightly analytics job.
+async function reconcilePending(uidFilter=null){
+  const admins=await db("tai_admins?select=user_id&limit=20");
+  const summaries=[];
+  for(const owner of (admins||[]).filter(a=>!uidFilter||a.user_id===uidFilter)){
+    const uid=owner.user_id;
+    const pending=await db("posts?select=id,upload_post_request_id&user_id=eq."+uid+
+      "&status=in.(processing,paused)&upload_post_request_id=not.is.null&order=created_at.asc&limit=8");
+    if(!pending?.length)continue;
+    const job=await startTrackedJob(uid,"reconcile",uidFilter?"manual":"cron");
+    await traceJob(uid,job,"scan_pending",20,"Đang kiểm tra "+pending.length+" bài chờ đối soát.");
+    let ok=0,awaiting=0,errors=0;
+    for(const p of pending){
+      try{
+        const output=await actionReconcile(uid,{postId:p.id,_jobId:job});
+        if(output.status==="published"||output.status==="failed")ok++;
+        else awaiting++;
+      }catch(e){
+        errors++;
+        await traceJob(uid,job,"reconcile_warning",75,
+          "Lỗi đối soát bài: "+cleanStatusMessage(e.message),"running",{post_id:p.id});
+      }
+    }
+    const message="Đối soát: "+ok+" bài đã xác minh, "+awaiting+" còn chờ, "+errors+" gặp lỗi.";
+    await traceJob(uid,job,errors===pending.length?"failed":"completed",100,message,
+      errors===pending.length?"failed":"completed");
+    summaries.push({jobId:job,checked:pending.length,verified:ok,awaiting,errors});
+  }
+  return {ok:true,results:summaries};
+}
 async function agentReconcileAndAnalyze(uidFilter=null){
   const settings=await db("app_settings?select=user_id,config&limit=200");
   const results=[];
@@ -630,6 +661,7 @@ Deno.serve(async(req)=>{
       const job=await req.json();
       if(job.action==="agent-tick")return result(await agentTick(),200,origin);
       if(job.action==="agent-analyze")return result(await agentReconcileAndAnalyze(),200,origin);
+      if(job.action==="agent-reconcile")return result(await reconcilePending(),200,origin);
       if(job.action==="job-health")return result(await healthCheckJobs(),200,origin);
       return result({error:"Invalid cron action"},400,origin);
     }catch(e){console.error("tai-cron",safeRunNote(e.message));return result({error:"Unauthorized scheduler request"},401,origin)}
@@ -645,6 +677,7 @@ Deno.serve(async(req)=>{
     if(action==="status")return result({ok:true,admin:true,mode:"review-first",providers:{gemini:!!Deno.env.get("GEMINI_API_KEY"),groq:!!Deno.env.get("GROQ_API_KEY"),uploadPost:!!Deno.env.get("UPLOAD_POST_API_KEY")},uploadProfile:Deno.env.get("UPLOAD_POST_PROFILE")||"default"},200,origin);
     if(action==="agent-tick")return result(await agentTick(uid),200,origin);
     if(action==="agent-analyze")return result(await agentReconcileAndAnalyze(uid),200,origin);
+    if(action==="agent-reconcile")return result(await reconcilePending(uid),200,origin);
     if(action==="profile-sync")return result({ok:true,profile:await withManualJob(uid,"analytics_sync",body,async b=>{await traceJob(uid,b._jobId,"profile_metrics",45,"Đang lấy số liệu Upload-Post.");const data=await syncUploadPostProfile(uid);await traceJob(uid,b._jobId,"profile_saved",85,"Đã lưu số liệu Threads vào database.");return data})},200,origin);
     if(action==="job-health")return result(await healthCheckJobs(uid),200,origin);
     if(action==="generate")return result(await withManualJob(uid,"manual_ai",body,b=>actionGenerate(uid,b)),200,origin);
