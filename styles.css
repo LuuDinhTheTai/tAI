@@ -102,3 +102,66 @@
 .latest-job-end{display:flex;align-items:center;gap:14px;flex-shrink:0}
 .latest-job-end span{font-weight:800;color:#38795b;font-variant-numeric:tabular-nums}
 @media(max-width:700px){.latest-job{flex-wrap:wrap;padding:16px}.latest-job-end{width:100%;justify-content:space-between}}
+
+
+/* AI Live Monitor: observation-first interface, not an internal model-thought viewer. */
+.ai-live-screen{padding:0;overflow:hidden}
+.ai-live-top{display:flex;align-items:flex-start;justify-content:space-between;gap:20px;flex-wrap:wrap;padding:25px 27px 17px;background:linear-gradient(120deg,#f4faf7,#fbfdfb);border-bottom:1px solid var(--border)}
+.ai-live-eyebrow{display:flex;align-items:center;gap:7px;font-size:10px;font-weight:800;letter-spacing:.12em;color:#43866a;margin-bottom:10px}
+.ai-live-eyebrow svg{width:15px;height:15px}
+.ai-live-top h3{margin:0;color:var(--ink);font-size:22px;letter-spacing:-.02em}
+.ai-live-top p{margin:8px 0 0;color:var(--muted);font-size:12px;line-height:1.6;max-width:490px}
+.ai-live-connection{display:inline-flex;align-items:center;gap:9px;padding:8px 12px;border:1px solid var(--border);border-radius:100px;background:#fff;color:#84928a;font-size:11px;font-weight:700;white-space:nowrap}
+.ai-live-connection.connected{color:#26734e;border-color:#bce1c9;background:#eaf7ee}
+.ai-live-pulse{width:8px;height:8px;border-radius:99px;background:currentColor;opacity:.8}
+.ai-live-connection.connected .ai-live-pulse{animation:ai-live-pulse 1.8s ease-in-out infinite}
+@keyframes ai-live-pulse{50%{opacity:.25;transform:scale(.7)}}
+.ai-live-state{display:flex;align-items:center;flex-wrap:wrap;gap:12px;padding:23px 27px 15px}
+.ai-live-state-tag{padding:8px 11px;border-radius:8px;background:#eef2f0;color:#576e61;letter-spacing:.035em;font-size:11px;font-weight:800}
+.ai-live-state-tag.running{background:#eaf1ff;color:#315e9b}
+.ai-live-state-tag.completed{background:#e6f5e9;color:#2c774c}
+.ai-live-state-tag.failed{background:#ffebee;color:#aa3d50}
+.ai-live-state-tag.skipped{background:#fff3e3;color:#9d712f}
+.ai-live-current-text{color:var(--ink);font-size:13px;font-weight:600;line-height:1.6;min-width:0;overflow-wrap:anywhere}
+.ai-live-progress{display:flex;align-items:center;gap:14px;padding:0 27px}
+.ai-live-progress-track{flex:1;height:10px;border-radius:100px;overflow:hidden;background:#e9f0ec}
+.ai-live-progress-track span{display:block;height:100%;border-radius:100px;background:linear-gradient(90deg,#66a88b,#3e8a68);transition:width .32s ease}
+.ai-live-progress strong{font-size:14px;min-width:40px;text-align:right;font-variant-numeric:tabular-nums;color:#347c5a}
+.ai-live-meta{display:flex;flex-wrap:wrap;gap:9px 22px;padding:15px 27px 24px;color:var(--muted);font-size:11px}
+.ai-live-meta span{display:inline-flex;align-items:center;gap:6px}
+.ai-live-meta svg{width:13px;height:13px}
+.ai-live-layout{display:grid;grid-template-columns:minmax(0,1fr) minmax(240px,33%);border-top:1px solid var(--border)}
+.ai-live-process{padding:24px 27px 17px;min-width:0}
+.ai-live-side{padding:24px 21px;border-left:1px solid var(--border);background:#fcfefd;min-width:0}
+.ai-live-process h4,.ai-live-side h4{color:var(--ink);font-size:13px;margin:0 0 18px}
+.ai-live-steps{list-style:none;padding:0 0 0 3px;margin:0}
+.ai-live-step{display:flex;gap:14px;position:relative;padding-bottom:22px;min-height:63px}
+.ai-live-step:not(:last-child):before{content:"";position:absolute;top:30px;left:13px;width:2px;height:calc(100% - 20px);background:#e3eae6}
+.ai-live-step.done:not(:last-child):before{background:#acd6b8}
+.ai-live-step-marker{width:28px;height:28px;flex:0 0 28px;display:grid;place-items:center;background:#f0f3f0;border:1px solid #dce6df;border-radius:50%;color:#83948a;font-weight:800;font-size:11px;position:relative;z-index:1}
+.ai-live-step.done .ai-live-step-marker{background:#e5f5e9;color:#368454;border-color:#b1d6bc}
+.ai-live-step.active .ai-live-step-marker{background:#e5efff;color:#2861a4;border-color:#a8c1e9;box-shadow:0 0 0 5px rgba(57,121,202,.08)}
+.ai-live-step.error .ai-live-step-marker{background:#fff0f0;color:#aa4f57;border-color:#ebbbc0}
+.ai-live-step.waiting .ai-live-step-marker{background:#fff6e8;color:#9e762c;border-color:#ead3aa}
+.ai-live-step-body{padding-top:1px;flex:1;min-width:0}
+.ai-live-step-head{display:flex;align-items:baseline;justify-content:space-between;flex-wrap:wrap;gap:7px}
+.ai-live-step-head strong{font-size:12px;font-weight:750;color:var(--ink)}
+.ai-live-step-head small{font-size:10px;color:var(--muted)}
+.ai-live-step-body p{margin:5px 0 0;font-size:11px;line-height:1.55;color:var(--muted)}
+.ai-live-step.pending{opacity:.6}
+.ai-live-runs{display:flex;flex-direction:column;gap:8px}
+.ai-live-run{display:flex;flex-direction:column;align-items:stretch;gap:5px;text-align:left;background:#fff;border:1px solid var(--border);border-radius:9px;cursor:pointer;padding:12px 13px;color:var(--ink);font-weight:750;font-size:12px}
+.ai-live-run.selected{background:#eef8f1;border-color:#8dc5a2}
+.ai-live-run:hover{border-color:#7dae97}
+.ai-live-run-meta{font-size:10px;color:var(--muted);font-weight:500;line-height:1.45}
+.ai-live-small{font-size:11px;line-height:1.6;color:var(--muted);margin:19px 0 0}
+.ai-live-last{padding:16px 27px;border-top:1px solid var(--border);color:var(--muted);font-size:11px;line-height:1.5;margin:0;overflow-wrap:anywhere}
+.ai-live-note{margin:16px 3px}
+.ai-live-empty{text-align:center;padding:55px 24px 65px}
+.ai-live-empty h3{margin:12px 0;color:var(--ink);font-size:17px}
+.ai-live-empty p{max-width:500px;margin:0 auto;color:var(--muted);font-size:12px;line-height:1.8}
+.ai-live-symbol{display:grid;place-items:center;width:58px;height:58px;border-radius:18px;background:#edf7f0;color:#458965;margin:auto}
+.ai-live-nav-dot{width:7px;height:7px;border-radius:50%;background:#5cad79;margin-left:auto}
+@media(max-width:880px){.ai-live-layout{grid-template-columns:1fr}.ai-live-side{border-left:0;border-top:1px solid var(--border)}}
+@media(max-width:600px){.ai-live-top,.ai-live-state{padding-left:18px;padding-right:18px}.ai-live-progress{padding:0 18px}.ai-live-meta{padding:12px 18px 21px}.ai-live-process,.ai-live-side{padding:20px 18px}.ai-live-last{padding:14px 18px}.ai-live-top h3{font-size:19px}}
+@media(prefers-reduced-motion:reduce){.ai-live-pulse{animation:none!important}.ai-live-progress-track span{transition:none}}
