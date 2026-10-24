@@ -103,7 +103,7 @@ async function connectAILiveSocket(){
        postgres_changes:[
          {event:"*",schema:"public",table:"job_runs",filter:"user_id=eq."+userId},
          {event:"INSERT",schema:"public",table:"job_logs",filter:"user_id=eq."+userId},
-         {event:"UPDATE",schema:"public",table:"posts",filter:"user_id=eq."+userId}
+         {event:"*",schema:"public",table:"posts",filter:"user_id=eq."+userId}
        ]}
    },ref,join_ref:ref}));
    wsAIHeartbeat=setInterval(()=>liveSend("phoenix","heartbeat",{},null),20000);
@@ -300,6 +300,7 @@ function aiLiveContent(){
   +'<div class="ai-live-meta"><span>'+svg('clock')+' Bắt đầu: '+escapeHtml(dateFmt(current.started_at))+'</span><span>Thời gian: '+duration+' giây</span>'+(product?'<span>Sản phẩm: '+escapeHtml(product.title)+'</span>':'')+(model?'<span>Model phản hồi: '+escapeHtml(String(model))+'</span>':'')+'</div>'
   +'<div class="ai-live-layout"><div class="ai-live-process"><h4>Các bước AI đã thực hiện</h4><ol class="ai-live-steps">'+steps+'</ol></div>'
   +'<aside class="ai-live-side"><h4>Các lượt chạy gần đây</h4><div class="ai-live-runs">'+recent+'</div><p class="ai-live-small">Đây là tiến trình công việc do backend ghi nhận, không phải nội dung suy nghĩ ẩn hoặc từng token AI đang tạo.</p></aside></div>'
+  +(post?.content?'<div class="ai-live-preview"><div class="ai-live-preview-label">'+svg('file-text')+' Nội dung AI đã lưu</div><p>'+escapeHtml(String(post.content).slice(0,1000))+'</p></div>':'')
   +(recentStage?'<p class="ai-live-last">Cập nhật cuối: '+escapeHtml(dateFmt(recentStage.created_at))+' · '+escapeHtml(recentStage.event||"")+'</p>':'')
   +'</section>';
 }
