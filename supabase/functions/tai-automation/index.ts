@@ -253,21 +253,100 @@ async function actionPublish(uid,body) {
     throw Object.assign(Error("Kết quả từ Upload-Post chưa rõ. Đã tạm dừng bài để tránh đăng trùng."),{status:502});
   }
 }
+// Normalize the nested envelopes returned by Hosted MCP tools/call.
+// The provider may return the actual payload under result, data,
+// structuredContent, a JSON-string content block, or a combination thereof.
+function uploadPostPayload(value) {
+  let current=value;
+  for(let depth=0;depth<8;depth++){
+    if(typeof current==="string"){
+      try{current=JSON.parse(current);continue}catch{return {message:current.slice(0,120)}}
+    }
+    if(!current||typeof current!=="object")return {};
+    if(current.isError===true || current.success===false&&current.error) {
+      throw Error("Upload-Post tool reported an error");
+    }
+    if(typeof current.status==="string" || Array.isArray(current.results) ||
+       Array.isArray(current.history) || current.post_metrics || current.platforms) return current;
+    const content=current.content;
+    if(Array.isArray(content)){
+      const block=content.find(c=>c?.type==="text"&&typeof c.text==="string");
+      if(block){current=block.text;continue}
+    }
+    if(current.structuredContent&&typeof current.structuredContent==="object"){current=current.structuredContent;continue}
+    if(current.result&&typeof current.result==="object"){current=current.result;continue}
+    if(current.data&&typeof current.data==="object"){current=current.data;continue}
+    if(current.output&&typeof current.output==="object"){current=current.output;continue}
+    return current;
+  }
+  return current&&typeof current==="object"?current:{};
+}
+function statusUploadPost(data,expectedRequestId) {
+  const payload=uploadPostPayload(data);
+  const rid=String(payload.request_id||payload.requestId||"");
+  if(rid&&rid!==expectedRequestId)throw Error("Upload-Post returned a different request_id");
+  const status=String(payload.status||"unknown").toLowerCase();
+  const results=Array.isArray(payload.results)?payload.results:[];
+  const threads=results.filter(x=>String(x?.platform||"").toLowerCase()==="threads");
+  const successful=threads.find(x=>x.success===true&&
+    (typeof x.platform_post_id==="string"||typeof x.platform_post_id==="number")&&
+    String(x.platform_post_id).length>0);
+  const explicitFail=threads.length>0&&threads.every(x=>x.success===false);
+  // "completed" means the batch finished; it does NOT prove a Threads post succeeded.
+  const target=successful?"published":explicitFail||(
+    status==="failed"&&threads.length===0)?"failed":"processing";
+  const stamp=successful?.upload_timestamp;
+  const time=typeof stamp==="string"?stamp:stamp?.$date;
+  const postedTime=time&&!Number.isNaN(Date.parse(time))?new Date(time).toISOString():new Date().toISOString();
+  return {target,status,threadsPostId:successful?String(successful.platform_post_id):null,
+    postedTime,postUrl:typeof successful?.post_url==="string"?successful.post_url:null,
+    reason:threads.find(x=>x.success===false)?.error_message||null,
+    requestId:rid||expectedRequestId};
+}
 async function actionReconcile(uid,body) {
   if(!uuid(body.postId))throw Object.assign(Error("Invalid postId"),{status:400});
   const p=(await db("posts?select=*&id=eq."+body.postId+"&user_id=eq."+uid+"&limit=1"))?.[0];
   if(!p?.upload_post_request_id)throw Object.assign(Error("Bài chưa có request_id để đối soát."),{status:409});
+  if(p.status==="published"&&p.threads_post_id) {
+    return {ok:true,postId:p.id,status:"published",alreadyReconciled:true,threadsPostId:p.threads_post_id};
+  }
   await traceJob(uid,body._jobId,"reconcile",45,"Đang truy vấn trạng thái Upload-Post.","running",{post_id:p.id});
   const remote=await mcpCall("get_status",{requestId:p.upload_post_request_id});
-  const remoteStatus=String(remote?.status||remote?.data?.status||"unknown").toLowerCase();
-  const results=remote?.results||remote?.data?.results||[];
-  const threads=Array.isArray(results)?results.filter(x=>x.platform==="threads"):[];
-  const target=(threads.some(x=>x.success===true)||remoteStatus==="success")
-    ?"published":(threads.some(x=>x.success===false)||remoteStatus==="failed")
-    ?"failed":"processing";
-  await db("posts?id=eq."+p.id+"&user_id=eq."+uid,{method:"PATCH",body:{status:target,...(target==="published"?{published_at:new Date().toISOString()}:{}),...(target==="failed"?{last_error:JSON.stringify(remote).slice(0,450)}:{})}});
-  await audit(uid,target==="failed"?"error":"info","Đối soát Upload-Post: "+remoteStatus,p.id);
-  return {ok:true,postId:p.id,status:target,remoteStatus,remote};
+  let parsed=statusUploadPost(remote,p.upload_post_request_id);
+  // Some Hosted MCP versions wrap result in an unexpected envelope. A read-only
+  // fallback uses the exact request_id, never re-uploads or sends new content.
+  if(parsed.status==="unknown"&&parsed.target==="processing"){
+    try{
+      const detail=uploadPostPayload(await mcpCall("get_post_analytics",{requestId:p.upload_post_request_id}));
+      if(detail?.post?.request_id===p.upload_post_request_id&&detail?.platforms?.threads?.success===true){
+        const t=detail.platforms.threads;
+        parsed={...parsed,target:"published",status:"confirmed_by_post_analytics",
+          threadsPostId:String(t.platform_post_id||"")||null,
+          postUrl:typeof t.post_url==="string"?t.post_url:null,
+          postedTime:new Date().toISOString()};
+        if(!parsed.threadsPostId)parsed.target="processing";
+      }
+    }catch(e){console.error("reconcile_fallback",cleanStatusMessage(e.message))}
+  }
+  // Never regress an already confirmed publication to processing on a stale response.
+  const target=p.status==="published"?"published":parsed.target;
+  const patch=target==="published"?
+    {status:"published",published_at:p.published_at||parsed.postedTime,
+     ...(parsed.threadsPostId?{threads_post_id:parsed.threadsPostId}:{}),last_error:null}:
+    target==="failed"?{status:"failed",last_error:cleanStatusMessage(parsed.reason||"Threads publishing failed")}:
+    {status:p.status==="paused"?"paused":"processing"};
+  const changed=await db("posts?id=eq."+p.id+"&user_id=eq."+uid+"&upload_post_request_id=eq."+p.upload_post_request_id,
+    {method:"PATCH",prefer:"return=representation",body:patch});
+  if(changed?.length!==1)throw Error("Không thể cập nhật trạng thái bài sau đối soát");
+  const message=target==="published"?
+    "Đối soát xác nhận đã đăng Threads. ID: "+(parsed.threadsPostId||"chưa có"):
+    target==="failed"?"Đối soát xác nhận Threads thất bại.":
+    "Upload-Post chưa xác nhận; giữ bài ở trạng thái "+patch.status+".";
+  await audit(uid,target==="failed"?"error":target==="published"?"info":"warning",message,p.id);
+  await traceJob(uid,body._jobId,target==="published"?"threads_published":target==="failed"?"threads_failed":"await_reconcile",
+    90,message,"running",{post_id:p.id});
+  return {ok:true,postId:p.id,status:target,remoteStatus:parsed.status,
+    threadsPostId:parsed.threadsPostId,postUrl:parsed.postUrl};
 }
 
 /* Autonomous tAI, conservative Free-tier schedule: max one generated draft per UTC day.
