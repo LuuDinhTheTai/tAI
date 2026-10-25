@@ -10,7 +10,7 @@ select cron.schedule('tai-shopee-discovery', '30 1 * * *', $cron$
       'x-tai-cron',(select decrypted_secret from vault.decrypted_secrets where name='tai_cron_token')
     ),
     body := '{"action":"shopee-discover"}'::jsonb,
-    timeout_milliseconds := 25000
+    timeout_milliseconds := 90000
   );
 $cron$);
 -- Owner-only Realtime notifications for newly verified Shopee opportunities.
