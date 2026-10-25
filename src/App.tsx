@@ -3,27 +3,28 @@ import type {ReactNode} from "react";
 import type {Session} from "@supabase/supabase-js";
 import {Activity,ArrowRight,BarChart3,Bell,Box,ChevronLeft,ChevronsUpDown,Command,LayoutDashboard,LogOut,Menu,RefreshCw,Settings2,ShieldCheck,SquarePen,Wifi,Zap} from "lucide-react";
 import {supabase,loadData,migrateLegacySession,invokeAgent} from "./lib/supabase";
-import type {DataState,JobLog,JobRun,Post} from "./types";
+import type {DataState,JobLog,JobRun,Post,ShopeeOpportunity} from "./types";
 import {DEFAULT_SETTINGS,date} from "./types";
-import {OverviewPage,PostsPage,ProductsPage,AnalyticsPage,LivePage,AutomationPage,SettingsPage} from "./pages";
+import {OverviewPage,PostsPage,ProductsPage,AnalyticsPage,LivePage,AutomationPage,SettingsPage,ShopeePage} from "./pages";
 
-type Page="overview"|"posts"|"products"|"analytics"|"live"|"automation"|"settings";
+type Page="overview"|"posts"|"products"|"analytics"|"live"|"shopee"|"automation"|"settings";
 type ActionResult={ok?:boolean;status?:string;[key:string]:unknown};
 interface AppContextValue{data:DataState;session:Session|null;liveStatus:string;refresh:()=>Promise<void>;run:(action:string,fields?:Record<string,unknown>,notice?:string)=>Promise<ActionResult>;notify:(message:string,type?:"success"|"error")=>void;busy:boolean}
 const AppContext=createContext<AppContextValue|null>(null);
 export function useApp(){const value=useContext(AppContext);if(!value)throw new Error("Missing AppContext");return value}
-const initial:DataState={posts:[],products:[],jobs:[],logs:[],agentRuns:[],profile:null,settings:DEFAULT_SETTINGS,updatedAt:null};
+const initial:DataState={shopeeOffers:[],posts:[],products:[],jobs:[],logs:[],agentRuns:[],profile:null,settings:DEFAULT_SETTINGS,updatedAt:null};
 const routes:Record<Page,{label:string;icon:typeof Activity;description:string}>={
  overview:{label:"Tổng quan",icon:LayoutDashboard,description:"Toàn cảnh vận hành"},
  live:{label:"AI trực tiếp",icon:Activity,description:"Theo dõi tác vụ thời gian thực"},
  posts:{label:"Bài đăng",icon:SquarePen,description:"Nội dung & xuất bản"},
  products:{label:"Sản phẩm",icon:Box,description:"Kho affiliate"},
  analytics:{label:"Phân tích",icon:BarChart3,description:"Hiệu quả Threads"},
+ shopee:{label:"Shopee Discovery",icon:Box,description:"Tự tìm sản phẩm affiliate"},
  automation:{label:"AI & Tự động hóa",icon:Zap,description:"Điều khiển agent"},
  settings:{label:"Cài đặt",icon:Settings2,description:"Tài khoản & kết nối"}
 };
 function routeFromHash():Page{const key=window.location.hash.replace(/^#/,"");return key==="logs"?"live":key in routes?key as Page:"overview"}
-const ordered:Page[]=["overview","live","posts","products","analytics","automation","settings"];
+const ordered:Page[]=["overview","live","shopee","posts","products","analytics","automation","settings"];
 function mergeOne<T extends {id:string}>(items:T[],record:T,limit:number){return [record,...items.filter(x=>x.id!==record.id)].slice(0,limit)}
 function ApplicationShell({children,logout,session,refresh,loading,liveStatus,page,sidebarOpen,setSidebarOpen}:{
  children:ReactNode;logout:()=>Promise<void>;session:Session;refresh:()=>Promise<void>;loading:boolean;liveStatus:string;page:Page;sidebarOpen:boolean;setSidebarOpen:(open:boolean)=>void
@@ -39,11 +40,11 @@ function ApplicationShell({children,logout,session,refresh,loading,liveStatus,pa
    <div className="workspace-select"><span className="workspace-glyph"><Command size={19}/></span><span><b>tAI Workspace</b><small>Personal · Production</small></span><ChevronsUpDown size={16}/></div>
    <div className="sidebar-group-title">WORKSPACE</div>
    <nav className="nav-stack" aria-label="Điều hướng chính">
-   {ordered.slice(0,5).map(route=>{const I=routes[route].icon;return <a key={route} href={"#"+route} onClick={()=>setSidebarOpen(false)} className={"nav-item"+(page===route?" active":"")} aria-current={page===route?"page":undefined}><I size={18} strokeWidth={1.9}/><span>{routes[route].label}</span>{route==="live"&&jobsRunning>0?<b className="nav-count">{jobsRunning}</b>:null}</a>})}
+   {ordered.slice(0,6).map(route=>{const I=routes[route].icon;return <a key={route} href={"#"+route} onClick={()=>setSidebarOpen(false)} className={"nav-item"+(page===route?" active":"")} aria-current={page===route?"page":undefined}><I size={18} strokeWidth={1.9}/><span>{routes[route].label}</span>{route==="live"&&jobsRunning>0?<b className="nav-count">{jobsRunning}</b>:null}</a>})}
    </nav>
    <div className="sidebar-group-title second">CẤU HÌNH</div>
    <nav className="nav-stack" aria-label="Cấu hình hệ thống">
-   {ordered.slice(5).map(route=>{const I=routes[route].icon;return <a key={route} href={"#"+route} onClick={()=>setSidebarOpen(false)} className={"nav-item"+(page===route?" active":"")} aria-current={page===route?"page":undefined}><I size={18} strokeWidth={1.9}/><span>{routes[route].label}</span></a>})}
+   {ordered.slice(6).map(route=>{const I=routes[route].icon;return <a key={route} href={"#"+route} onClick={()=>setSidebarOpen(false)} className={"nav-item"+(page===route?" active":"")} aria-current={page===route?"page":undefined}><I size={18} strokeWidth={1.9}/><span>{routes[route].label}</span></a>})}
    </nav>
    <div className="sidebar-end">
      <div className="sidebar-ai-card"><span className="small-spark"><Zap size={16}/></span><strong>AI Agent tự chủ</strong><p>Lịch chạy vận hành phía Supabase, độc lập với dashboard.</p><a href="#live">Xem tiến trình <ArrowRight size={15}/></a></div>
@@ -119,6 +120,11 @@ export default function App(){
    .on("postgres_changes",{event:"INSERT",schema:"public",table:"job_logs",filter:"user_id=eq."+uid},event=>{
      const record=event.new as JobLog;setData(old=>({...old,logs:mergeOne(old.logs,record,200).sort((a,b)=>Date.parse(b.created_at)-Date.parse(a.created_at)),updatedAt:new Date()}));
    })
+   .on("postgres_changes",{event:"*",schema:"public",table:"shopee_opportunities",filter:"user_id=eq."+uid},event=>{
+     if(event.eventType==="DELETE"){void refresh();return}
+     const record=event.new as ShopeeOpportunity;
+     setData(old=>({...old,shopeeOffers:mergeOne(old.shopeeOffers,record,100).sort((a,b)=>b.score-a.score),updatedAt:new Date()}));
+   })
    .on("postgres_changes",{event:"*",schema:"public",table:"posts",filter:"user_id=eq."+uid},event=>{
      if(event.eventType==="DELETE"){void refresh();return}
      const record=event.new as Post;setData(old=>({...old,posts:mergeOne(old.posts,record,200).sort((a,b)=>Date.parse(b.created_at)-Date.parse(a.created_at)),updatedAt:new Date()}));
@@ -140,7 +146,7 @@ export default function App(){
  const context=useMemo(()=>({data,session,liveStatus,refresh,run,notify,busy}),[data,session,liveStatus,refresh,run,notify,busy]);
  if(!authReady)return <div className="boot-screen"><div className="brand-mark large">t<span>AI</span></div><span>Đang chuẩn bị workspace…</span></div>;
  if(!session)return <Login onLogin={login} loading={loginLoading} error={loginError}/>;
- const PageComponent=({overview:OverviewPage,posts:PostsPage,products:ProductsPage,analytics:AnalyticsPage,live:LivePage,automation:AutomationPage,settings:SettingsPage})[page];
+ const PageComponent=({overview:OverviewPage,posts:PostsPage,products:ProductsPage,analytics:AnalyticsPage,live:LivePage,shopee:ShopeePage,automation:AutomationPage,settings:SettingsPage})[page];
  return <AppContext.Provider value={context}>
   <a href="#main-content" className="skip-link">Chuyển đến nội dung</a>
   <ApplicationShell session={session} logout={logout} page={page} liveStatus={liveStatus} refresh={refresh} loading={loading} sidebarOpen={sidebarOpen} setSidebarOpen={setSidebarOpen}>
