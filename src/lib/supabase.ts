@@ -1,5 +1,5 @@
 import {createClient} from "@supabase/supabase-js";
-import type {AgentSettings,AgentRun,DataState,JobLog,JobRun,Post,Product,ProfileSnapshot} from "../types";
+import type {AgentSettings,AgentRun,DataState,JobLog,JobRun,Post,Product,ProfileSnapshot,ShopeeOpportunity} from "../types";
 import {DEFAULT_SETTINGS} from "../types";
 const legacy=(()=>{try{return JSON.parse(localStorage.getItem("tai.supabase.config")||"{}")}catch{return {}}})();
 export const SUPABASE_URL=import.meta.env.VITE_SUPABASE_URL||legacy.url||"https://idovyelypzisdngfcecc.supabase.co";
@@ -15,13 +15,13 @@ async function readRows<T>(table:string,limit:number,order:string="created_at"):
  if(error)throw error;return (data||[]) as T[];
 }
 export async function loadData():Promise<DataState>{
- const [posts,products,jobs,logs,agents,profiles,settings]=await Promise.all([
+ const [posts,products,jobs,logs,agents,profiles,settings,shopeeOffers]=await Promise.all([
   readRows<Post>("posts",200),readRows<Product>("products",200),readRows<JobRun>("job_runs",40,"started_at"),readRows<JobLog>("job_logs",200),
   readRows<AgentRun>("agent_runs",10,"started_at"),readRows<ProfileSnapshot>("social_profile_snapshots",1,"snapshot_date"),
-  supabase.from("app_settings").select("config").limit(1)
+  supabase.from("app_settings").select("config").limit(1),readRows<ShopeeOpportunity>("shopee_opportunities",100,"score")
  ]);
  if(settings.error)throw settings.error;
- return {posts,products,jobs,logs,agentRuns:agents,profile:profiles[0]||null,settings:{...DEFAULT_SETTINGS,...((settings.data?.[0]?.config||{}) as Partial<AgentSettings>)},updatedAt:new Date()};
+ return {shopeeOffers,posts,products,jobs,logs,agentRuns:agents,profile:profiles[0]||null,settings:{...DEFAULT_SETTINGS,...((settings.data?.[0]?.config||{}) as Partial<AgentSettings>)},updatedAt:new Date()};
 }
 export async function invokeAgent<T=Record<string,unknown>>(action:string,fields:Record<string,unknown>={}):Promise<T>{
  const {data,error}=await supabase.functions.invoke("tai-automation",{body:{action,...fields}});
