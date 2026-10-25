@@ -3,8 +3,8 @@ import type {FormEvent,ReactNode} from "react";
 import {Activity,AlertCircle,ArrowDownRight,ArrowRight,ArrowUpRight,BarChart3,Bell,Box,BrainCircuit,Check,CheckCircle2,ChevronDown,ChevronRight,Clock3,ExternalLink,Eye,FileText,Filter,Globe2,Heart,Info,Link as LinkIcon,LoaderCircle,LockKeyhole,MessageCircle,MoreHorizontal,PauseCircle,Play,Plus,RefreshCw,Search,Send,Settings2,ShieldCheck,Sparkles,TrendingUp,Wallet,Wifi,WifiOff,X,Zap} from "lucide-react";
 import {Area,AreaChart,CartesianGrid,ResponsiveContainer,Tooltip,XAxis,YAxis} from "recharts";
 import {useApp} from "./App";
-import {createDraft,createProduct,saveSettings,updateProduct,SUPABASE_URL, SUPABASE_KEY} from "./lib/supabase";
-import type {AgentSettings,JobRun,Post,Product} from "./types";
+import {createDraft,createProduct,saveSettings,updateProduct,invokeAgent,SUPABASE_URL, SUPABASE_KEY} from "./lib/supabase";
+import type {AgentSettings,JobRun,Post,Product,ShopeeConnection} from "./types";
 import {date,number,STATUS_LABEL,validUrl} from "./types";
 
 type ButtonTone="primary"|"soft"|"ghost"|"danger";
@@ -142,5 +142,131 @@ export function AutomationPage(){
 export function SettingsPage(){
  const {session,liveStatus}=useApp();return <><Heading eyebrow="WORKSPACE / SETTINGS" title="Cài đặt & kết nối" description="Thông tin dự án, trạng thái xác thực và bảo mật hệ thống."/>
  <div className="settings-columns"><Card><div className="settings-card-header"><span className="settings-symbol"><ShieldCheck size={22}/></span><div><h2>Phiên đăng nhập</h2><p>Supabase Auth · RLS</p></div><Status status="completed"/></div><div className="details-list"><div><span>Email</span><strong>{session?.user.email||"—"}</strong></div><div><span>User ID</span><code>{session?.user.id||"—"}</code></div><div><span>Realtime</span><strong>{liveStatus==="SUBSCRIBED"?"Đang kết nối":"Đang dự phòng tải lại"}</strong></div></div></Card><Card><div className="settings-card-header"><span className="settings-symbol neutral"><Globe2 size={22}/></span><div><h2>Hạ tầng hoạt động</h2><p>Hosting tĩnh miễn phí trên Cloudflare Pages</p></div></div><div className="details-list"><div><span>Frontend</span><strong>React 18 · Vite 5 · TypeScript</strong></div><div><span>Supabase Project</span><code>{SUPABASE_URL}</code></div><div><span>Client API Key</span><strong>Publishable Key (công khai)</strong></div><div><span>AI / Upload-Post secrets</span><strong>Chỉ lưu tại Supabase Edge Secrets</strong></div></div><div className="safe-callout"><LockKeyhole size={17}/> Giao diện không truy cập service_role hoặc khóa API riêng tư.</div></Card></div>
+ </>;
+}
+
+export function ShopeePage(){
+ const {data,run,refresh,session,notify,busy}=useApp();
+ const [connection,setConnection]=useState<ShopeeConnection|null>(null);
+ const [loading,setLoading]=useState(true);
+ const [saving,setSaving]=useState(false);
+ const [enabled,setEnabled]=useState(data.settings.shopee_enabled===true);
+ const [autoImport,setAutoImport]=useState(data.settings.shopee_auto_import===true);
+ const [terms,setTerms]=useState((data.settings.shopee_keywords||["chăm sóc da","đồ gia dụng"]).join(", "));
+ const [query,setQuery]=useState("");
+ const [filter,setFilter]=useState("all");
+ useEffect(()=>{
+   let active=true;setLoading(true);
+   invokeAgent<ShopeeConnection>("shopee-status").then(x=>{if(active)setConnection(x)})
+    .catch(()=>{if(active)setConnection(null)}).finally(()=>{if(active)setLoading(false)});
+   return()=>{active=false};
+ },[data.shopeeOffers.length]);
+ useEffect(()=>{
+  setEnabled(data.settings.shopee_enabled===true);
+  setAutoImport(data.settings.shopee_auto_import===true);
+  setTerms((data.settings.shopee_keywords||["chăm sóc da","đồ gia dụng"]).join(", "));
+ },[data.settings.shopee_enabled,data.settings.shopee_auto_import,data.settings.shopee_keywords?.join("|")]);
+ const records=data.shopeeOffers.filter(o=>
+   (filter==="all"||o.status===filter)&&
+   (o.product_name+" "+o.shop_name+" "+o.keyword).toLowerCase().includes(query.toLowerCase()));
+ const ready=connection?.configured===true;
+ const linked=data.shopeeOffers.filter(o=>o.affiliate_url&&o.status!=="rejected").length;
+ async function saveConfig(){
+   if(!session)return;
+   const kw=[...new Set(terms.split(",").map(x=>x.trim()).filter(x=>x.length>=3))].slice(0,3);
+   if(!kw.length){notify("Cần ít nhất một từ khóa từ 3 ký tự.","error");return}
+   if(autoImport&&enabled&&!window.confirm("Bật tự nhập sản phẩm Shopee đã xác minh link vào kho tAI? Agent hiện tại có thể tự đăng sản phẩm đó trên Threads trong lượt kế tiếp."))return;
+   setSaving(true);
+   try{
+     await saveSettings(session.user.id,{...data.settings,shopee_enabled:enabled,shopee_auto_import:autoImport,shopee_keywords:kw});
+     await refresh();notify("Đã lưu cấu hình Shopee Discovery.");
+   }catch(err){notify(err instanceof Error?err.message:"Không lưu được cấu hình Shopee","error")}
+   finally{setSaving(false)}
+ }
+ async function discover(){
+   const r=await run("shopee-discover");
+   if(r.ok===false&&r.reason==="missing_credentials"){
+     notify("Chưa có Shopee App ID/Secret trong Supabase Secrets.","error");return;
+   }
+   notify("Shopee: đã tìm "+String(r.found??0)+" offer và lưu "+String(r.saved??0)+" cơ hội.");
+ }
+ async function importOffer(id:string){
+   if(!window.confirm("Tạo link affiliate chính thức qua Shopee và thêm sản phẩm này vào kho tAI? Nếu Agent đang tự đăng, sản phẩm có thể được chọn ở kỳ tiếp theo."))return;
+   await run("shopee-import",{opportunityId:id},"Đã yêu cầu Shopee tạo link và nhập sản phẩm vào tAI.");
+ }
+ async function reject(id:string){
+   if(!window.confirm("Loại cơ hội này khỏi danh sách lựa chọn?"))return;
+   await run("shopee-reject",{opportunityId:id},"Đã loại cơ hội Shopee.");
+ }
+ return <>
+  <Heading eyebrow="AUTONOMOUS AFFILIATE / PHASE 01" title="Shopee Discovery"
+    description="AI tự tìm offer, đánh giá hoa hồng và tạo link affiliate được Shopee cấp — không sử dụng link giả."
+    actions={<><BusyButton execute={refresh}><RefreshCw size={16}/> Làm mới</BusyButton>
+    <BusyButton execute={discover} disabled={!ready||busy} tone="primary"><Search size={16}/> Tìm sản phẩm ngay</BusyButton></>}/>
+  <div className={"shopee-connection "+(ready?"ready":"pending")}>
+    <div className="shopee-connection-icon">{ready?<CheckCircle2 size={25}/>:<LockKeyhole size={25}/>}</div>
+    <div><span className="eyebrow">SHOPEE AFFILIATE OPEN API</span>
+      <strong>{loading?"Đang kiểm tra kết nối...":ready?"Đã cấu hình App ID + Secret":"Chưa kết nối Shopee Open API"}</strong>
+      <p>{ready?"Khóa được giữ phía Supabase Edge Function. Có thể dùng nút tìm sản phẩm để kiểm tra quyền Open API.":"Hệ thống chưa có bằng chứng Shopee App ID/Secret. Chưa thể tự tìm offer hoặc tạo link nhận hoa hồng."}</p></div>
+    <a href="https://affiliate.shopee.vn/open_api/list" target="_blank" rel="noopener noreferrer" className="button button-soft">Shopee Open API <ExternalLink size={15}/></a>
+  </div>
+  <div className="metrics-grid">
+    <Metric label="Cơ hội từ Shopee" value={number(data.shopeeOffers.length)} subtitle="Lưu từ API chính thức" icon={Box} variant="mint"/>
+    <Metric label="Link đã tạo" value={number(linked)} subtitle="Short link được xác minh" icon={LinkIcon} variant="blue"/>
+    <Metric label="Đã nhập kho tAI" value={number(data.shopeeOffers.filter(o=>o.status==="imported").length)} subtitle="Sẵn sàng cho Content Agent" icon={CheckCircle2}/>
+    <Metric label="Tự động tìm hàng ngày" value={connection?.enabled?"Đang bật":"Đang tắt"} subtitle="08:30 giờ Việt Nam" icon={Clock3} variant="amber"/>
+  </div>
+  <div className="shopee-grid">
+   <div className="shopee-primary">
+    <Card>
+     <div className="section-head shopee-section-head"><div><span className="eyebrow">DISCOVERED OPPORTUNITIES</span><h2>Danh sách sản phẩm tìm được</h2><p>Chỉ gồm dữ liệu do Shopee API trả về.</p></div></div>
+     <div className="table-toolbar"><div className="search-box"><Search size={16}/>
+       <input aria-label="Tìm cơ hội Shopee" placeholder="Tìm sản phẩm, shop hoặc từ khóa..." value={query} onChange={e=>setQuery(e.target.value)}/></div>
+       <select aria-label="Lọc cơ hội" value={filter} onChange={e=>setFilter(e.target.value)}>
+         <option value="all">Tất cả</option><option value="discovered">Mới tìm thấy</option>
+         <option value="linked">Đã tạo link</option><option value="imported">Đã nhập tAI</option>
+         <option value="rejected">Đã loại</option></select>
+     </div>
+     {records.length?<div className="shopee-list">{records.map(o=>
+       <article className="shopee-offer" key={o.id}>
+        <div className="shopee-offer-top"><div className="shopee-score"><strong>{o.score}</strong><small>/100</small></div>
+         <div className="shopee-offer-main"><h3>{o.product_name}</h3><p>{o.shop_name||"Shop Shopee"} · {o.keyword}</p>
+           <div className="shopee-offer-details"><span>Hoa hồng <b>{o.commission_rate===null?"—":(o.commission_rate*100).toLocaleString("vi-VN",{maximumFractionDigits:2})+"%"}</b></span>
+            <span>Giá <b>{o.price_vnd===null?"—":number(o.price_vnd)+" ₫"}</b></span>
+            <span>Đã bán <b>{number(o.sales)}</b></span></div></div>
+        </div>
+        <div className="shopee-offer-foot"><Status status={o.status}/>
+         <a href={o.product_url||"#"} target="_blank" rel="noopener noreferrer" className="subtle-link"><ExternalLink size={14}/> Sản phẩm</a>
+         {o.affiliate_url&&<a href={o.affiliate_url} target="_blank" rel="noopener noreferrer" className="subtle-link"><LinkIcon size={14}/> Affiliate link</a>}
+         {o.status!=="imported"&&o.status!=="rejected"&&<BusyButton disabled={!ready} execute={()=>importOffer(o.id)} tone="primary"><Plus size={14}/> Tạo link & nhập</BusyButton>}
+         {o.status==="discovered"&&<BusyButton execute={()=>reject(o.id)}>Loại</BusyButton>}
+        </div>
+       </article>)}</div>:
+       <Empty icon={Search} title="Chưa có cơ hội Shopee"
+         body={ready?"Nhấn “Tìm sản phẩm ngay” để gọi API và chấm điểm các offer.":"Cần được Shopee cấp quyền Open API và cấu hình credentials phía server trước khi có dữ liệu thật."}/>}
+    </Card>
+   </div>
+   <div className="shopee-side">
+    <Card>
+     <div className="settings-card-header"><span className="settings-symbol"><BrainCircuit size={22}/></span><div><h2>Discovery Agent</h2><p>Thiết lập tự tìm và nhập sản phẩm</p></div></div>
+     <div className="setting-toggle"><div><strong>Tự tìm offer mỗi ngày</strong><p>Chạy lúc 08:30 qua Supabase Cron.</p></div>
+       <label className="switch"><input type="checkbox" checked={enabled} onChange={e=>setEnabled(e.target.checked)} aria-label="Bật Shopee Discovery hằng ngày"/><span/></label></div>
+     <div className="setting-toggle"><div><strong>Tự tạo link và nhập sản phẩm</strong><p>Tối đa một sản phẩm phù hợp mỗi lượt, chỉ dùng link Shopee cấp.</p></div>
+       <label className="switch"><input type="checkbox" checked={autoImport} onChange={e=>setAutoImport(e.target.checked)} aria-label="Tự nhập sản phẩm Shopee vào tAI"/><span/></label></div>
+     <div className="field-group"><label htmlFor="shopee-keywords">Từ khóa tìm kiếm (tối đa 3)</label>
+       <textarea id="shopee-keywords" rows={3} value={terms} onChange={e=>setTerms(e.target.value)} placeholder="chăm sóc da, đồ gia dụng"/>
+       <p className="field-help">Phân cách bằng dấu phẩy. Tối đa 10 offer/từ khóa trong mỗi lượt chạy.</p></div>
+     {enabled&&autoImport&&<div className="warning-callout"><AlertCircle size={18}/><span>Khi sản phẩm được nhập vào kho đang hoạt động, AI Agent có thể chọn và tự đăng Threads theo cấu hình hiện tại.</span></div>}
+     <BusyButton disabled={saving} execute={saveConfig} tone="primary"><Check size={16}/> Lưu cấu hình Shopee</BusyButton>
+    </Card>
+    <Card className="shopee-setup">
+      <span className="eyebrow">SECURE SETUP</span><h2>Kết nối tài khoản Shopee</h2>
+      <p>Đăng ký quyền Shopee Affiliate Open API, rồi lưu hai biến trong <strong>Supabase → Edge Functions → Secrets</strong>:</p>
+      <code>SHOPEE_AFFILIATE_APP_ID</code><code>SHOPEE_AFFILIATE_SECRET</code>
+      <p>Không dán Secret vào dashboard, GitHub hoặc ChatGPT. Dữ liệu chỉ được đồng bộ khi kết nối API hợp lệ.</p>
+      <a className="subtle-link" href="https://supabase.com/dashboard/project/idovyelypzisdngfcecc/settings/functions" target="_blank" rel="noopener noreferrer">Mở Supabase Secrets <ExternalLink size={15}/></a>
+    </Card>
+   </div>
+  </div>
  </>;
 }
