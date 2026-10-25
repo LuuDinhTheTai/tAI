@@ -1,3 +1,4 @@
+import {createShopeeAgent} from "./shopee.ts";
 // tAI: authenticated, owner-only AI draft + Upload-Post Hosted MCP adapter.
 // Secrets: GEMINI_API_KEY, GROQ_API_KEY, UPLOAD_POST_API_KEY; NEVER pass secrets to browsers.
 // Start-up safety: creates drafts only. Publishing requires a separate explicit request.
@@ -648,6 +649,7 @@ async function agentReconcileAndAnalyze(uidFilter=null){
   return {ok:true,results};
 }
 
+const shopee=createShopeeAgent({db,traceJob,startTrackedJob,audit,uuid});
 Deno.serve(async(req)=>{
   const origin=req.headers.get("Origin")||"";
   if(!originAllowed(origin))return result({error:"Origin not allowed"},403,origin);
@@ -661,6 +663,7 @@ Deno.serve(async(req)=>{
       const job=await req.json();
       if(job.action==="agent-tick")return result(await agentTick(),200,origin);
       if(job.action==="agent-analyze")return result(await agentReconcileAndAnalyze(),200,origin);
+      if(job.action==="shopee-discover")return result(await shopee.daily(),200,origin);
       if(job.action==="agent-reconcile")return result(await reconcilePending(),200,origin);
       if(job.action==="job-health")return result(await healthCheckJobs(),200,origin);
       return result({error:"Invalid cron action"},400,origin);
@@ -676,6 +679,10 @@ Deno.serve(async(req)=>{
     activeAction=action;
     if(action==="status")return result({ok:true,admin:true,mode:"review-first",providers:{gemini:!!Deno.env.get("GEMINI_API_KEY"),groq:!!Deno.env.get("GROQ_API_KEY"),uploadPost:!!Deno.env.get("UPLOAD_POST_API_KEY")},uploadProfile:Deno.env.get("UPLOAD_POST_PROFILE")||"default"},200,origin);
     if(action==="agent-tick")return result(await agentTick(uid),200,origin);
+    if(action==="shopee-status")return result(await shopee.status(uid),200,origin);
+    if(action==="shopee-discover")return result(await shopee.discover(uid),200,origin);
+    if(action==="shopee-import")return result(await shopee.importOffer(uid,body.opportunityId),200,origin);
+    if(action==="shopee-reject")return result(await shopee.reject(uid,body.opportunityId),200,origin);
     if(action==="agent-analyze")return result(await agentReconcileAndAnalyze(uid),200,origin);
     if(action==="agent-reconcile")return result(await reconcilePending(uid),200,origin);
     if(action==="profile-sync")return result({ok:true,profile:await withManualJob(uid,"analytics_sync",body,async b=>{await traceJob(uid,b._jobId,"profile_metrics",45,"Đang lấy số liệu Upload-Post.");const data=await syncUploadPostProfile(uid);await traceJob(uid,b._jobId,"profile_saved",85,"Đã lưu số liệu Threads vào database.");return data})},200,origin);
